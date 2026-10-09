@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -19,6 +20,16 @@ class Settings(BaseSettings):
     bitable_date_field: str = Field(default="记账日期", min_length=1)
     bitable_amount_field: str = Field(default="金额", min_length=1)
     bitable_description_field: str = Field(default="具体", min_length=1)
+    bitable_category1_field: str = "一级分类"
+    bitable_category2_field: str = "二级分类"
+    bitable_category3_field: str = "三级分类"
+    agent_system_prompt_path: Path = Path("prompts/system.md")
+    categories_path: Path = Path("knowledge/categories.json")
+    rules_path: Path = Path("knowledge/rules.json")
+    preferences_path: Path = Path("knowledge/preferences.json")
+    schema_path: Path = Path("knowledge/schema.json")
+    operation_journal_path: Path = Path(".runtime/operations.json")
+    context_ttl_seconds: float = Field(default=1800, gt=0)
     lark_cli_path: str = Field(default="lark-cli", min_length=1)
     lark_cli_identity: Literal["user", "bot"] = "user"
     cli_timeout_seconds: float = Field(default=30, gt=0)
@@ -38,3 +49,11 @@ class Settings(BaseSettings):
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError("invalid display timezone") from exc
         return value
+
+    @property
+    def category_fields(self) -> tuple[str, str, str]:
+        return (
+            self.bitable_category1_field,
+            self.bitable_category2_field,
+            self.bitable_category3_field,
+        )

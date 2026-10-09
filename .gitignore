@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+/tests/
 .ruff_cache/
 build/
 dist/
@@ -16,3 +17,5 @@ dist/
 *.manifest.json
 *.pem
 *.key
+
+knowledge/

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "feishu-bitable-bookkeeping-agent"
 version = "0.1.0"
-description = "飞书记账 Agent 的只读查询最小框架"
+description = "本地飞书记账智能体：自然语言记账、个人分类与即时纠错"
 requires-python = ">=3.11"
 dependencies = [
   "lark-channel-sdk==1.4.0",
