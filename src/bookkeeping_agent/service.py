@@ -355,6 +355,7 @@ class BookkeepingService:
                 emit("table.schema_validated", schema=schema)
                 require()
                 if record_id:
+                    emit("table.correction_check", record_id=record_id)
                     actual = await self.tool.get_record(record_id)
                     original = self.tool.expense_fields(session.last_expense)
                     # Never overwrite data edited outside this conversation.

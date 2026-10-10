@@ -90,6 +90,7 @@ def build_agent(settings: Settings, model: Model | None = None) -> Agent:
             rows = await ctx.deps.tool.history(keyword)
             emit("history.rows", rows=rows)
         except QueryError:
+            emit("history.error", status="error")
             return [{"error": "历史检索失败，不能以缺少证据为由猜测分类；必要时追问。"}]
         valid = []
         for row in rows:

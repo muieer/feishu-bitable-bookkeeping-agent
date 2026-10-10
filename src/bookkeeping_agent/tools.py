@@ -333,6 +333,7 @@ class BitableTool:
     async def update_record(self, record_id: str, fields: dict) -> None:
         await self._write("+record-batch-update", {"update_records": {record_id: fields}})
         try:
+            emit("table.update_verification_start", record_id=record_id)
             actual = await self.get_record(record_id)
             emit("table.update_verification", record_id=record_id, expected=fields, actual=actual)
             for name, expected in fields.items():

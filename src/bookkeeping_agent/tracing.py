@@ -279,8 +279,12 @@ def current_trace():
 
 
 def emit(stage, **details):
+    from .progress import observe
+
     trace = current_trace()
-    return trace.emit(stage, **details) if trace else True
+    recorded = trace.emit(stage, **details) if trace else True
+    observe(stage, details)
+    return recorded
 
 
 def require(*, reconciliation=False):

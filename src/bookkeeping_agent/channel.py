@@ -12,13 +12,15 @@ from lark_channel import (
 from pydantic import ValidationError
 
 from .config import Settings
+from .feedback import CardFeedback
 from .models import IncomingMessage
+from .progress import progress_scope
 from .service import BookkeepingService
 from .tracing import LOG_FAILED, LOG_FAILED_SUFFIX, TraceLogError, emit
 
 logger = logging.getLogger(__name__)
 
-PROCESSING_REACTIONS = ("OneSecond", "Typing", "OnIt")
+PROCESSING_REACTIONS = ("OneSecond",)
 REACTION_TIMEOUT_SECONDS = 3
 
 
@@ -37,6 +39,7 @@ def build_channel(settings: Settings) -> FeishuChannel:
 def register_handlers(channel: FeishuChannel, service: BookkeepingService) -> None:
     traces = service.traces
     chat_locks: dict[str, asyncio.Lock] = {}
+    active_messages: set[str] = set()
 
     async def add_processing_reaction(message_id, emoji_type):
         emit("reaction.request", emoji_type=emoji_type)
@@ -90,18 +93,57 @@ def register_handlers(channel: FeishuChannel, service: BookkeepingService) -> No
                 emit("message.invalid", status="error", error=exc)
                 logger.warning("message_invalid message_id=%s", message.message_id)
                 return
-            feedback = asyncio.create_task(acknowledge(message.message_id))
+            journal = getattr(service, "journal", None)
+            previous = journal.get(message.message_id) if journal else None
+            if message.message_id in active_messages or (
+                previous and previous["status"] == "success"
+            ):
+                emit("message.deduplicated", reason="active_or_success")
+                emit("message.end", outcome="silent")
+                return
+            active_messages.add(message.message_id)
             lock = chat_locks.setdefault(message.chat_id, asyncio.Lock())
+            feedback = CardFeedback(channel, message, queued=lock.locked())
+            initial = asyncio.create_task(feedback.acknowledge())
+            reaction = asyncio.create_task(acknowledge(message.message_id))
             try:
                 async with lock:
-                    await feedback
-                    await process_message(message, incoming, trace)
+                    await initial
+                    feedback.state.start()
+                    feedback.dirty.set()
+                    with progress_scope(feedback.on_event):
+                        await process_message(message, incoming, trace, feedback)
+            except asyncio.CancelledError:
+                if not initial.done():
+                    initial.cancel()
+                    await asyncio.gather(initial, return_exceptions=True)
+                if feedback.state.ended_at is None:
+                    response = (
+                        "表格写入已成功，但处理已中断；请勿重复发送这笔消费。"
+                        if feedback.state.confirmed
+                        else "处理已中断，写入结果待核对；请先检查表格，勿重复发送。"
+                        if trace.mutation_submitted
+                        else "处理已中断，本次未执行写入。"
+                    )
+                    feedback.state.finish(
+                        response, submitted=trace.mutation_submitted, interrupted=True
+                    )
+                    await feedback.deliver_final()
+                    emit("message.end", outcome="interrupted")
+                elif not feedback.final_delivered:
+                    # Cancellation can also interrupt final delivery after the business result is known.
+                    await feedback.deliver_final()
+                    emit("message.end", outcome="interrupted")
+                raise
             finally:
-                if not feedback.done():
-                    feedback.cancel()
-                    await asyncio.gather(feedback, return_exceptions=True)
+                for task in (initial, reaction):
+                    if not task.done() and asyncio.current_task().cancelling():
+                        task.cancel()
+                await asyncio.gather(initial, reaction, return_exceptions=True)
+                await feedback.stop()
+                active_messages.discard(message.message_id)
 
-    async def process_message(message, incoming, trace):
+    async def process_message(message, incoming, trace, feedback):
         logger.info("message_received message_id=%s", message.message_id)
         try:
             response = await service.reply(incoming)
@@ -112,32 +154,50 @@ def register_handlers(channel: FeishuChannel, service: BookkeepingService) -> No
             logger.warning(
                 "message_failed message_id=%s kind=%s", message.message_id, type(exc).__name__
             )
-            response = "处理未完成；如已提交记账，请先核对表格，勿重复发送。"
+            response = (
+                "表格写入已成功，但后续处理未完成；请勿重复发送这笔消费。"
+                if feedback.state.confirmed
+                else "处理未完成，写入结果待核对；请先检查表格，勿重复发送。"
+                if trace.mutation_submitted
+                else "处理未完成，本次未执行写入，请稍后重试。"
+            )
         if response is None:
+            # The preflight dedup normally catches this; concurrent direct service calls may win.
+            if feedback.message_id:
+                feedback.state.finish("这条消息已处理，本次未重复记账。")
+                feedback.state.status, feedback.state.title = "已结束", "消息已处理"
+                await feedback.deliver_final()
             emit("message.end", outcome="silent")
             return
         emit("reply.generated", response=response)
-        payload, opts = {"text": response}, {"reply_to": message.message_id}
-        emit("reply.request", chat_id=message.chat_id, payload=payload, options=opts)
+        feedback.state.finish(response, submitted=trace.mutation_submitted, log_failed=trace.failed)
+        emit(
+            "reply.request",
+            chat_id=message.chat_id,
+            payload={"card": feedback.state.snapshot()},
+            response=response,
+            options={"reply_to": message.message_id},
+        )
         if trace.failed:
             if trace.mutation_submitted:
                 if LOG_FAILED_SUFFIX not in response:
                     response += LOG_FAILED_SUFFIX
             else:
                 response = LOG_FAILED
-            payload = {"text": response}
+            feedback.state.finish(response, submitted=trace.mutation_submitted, log_failed=True)
             logger.error("reply_without_trace message_id=%s", message.message_id)
         try:
-            result = await channel.send(message.chat_id, payload, opts)
+            result = await feedback.deliver_final()
             emit("reply.result", result=result)
+            response = feedback.state.response
             logger.log(
-                logging.INFO if result.success else logging.ERROR,
-                "reply_sent message_id=%s" if result.success else "reply_failed message_id=%s",
+                logging.INFO if result else logging.ERROR,
+                "reply_sent message_id=%s" if result else "reply_failed message_id=%s",
                 message.message_id,
             )
             emit(
                 "message.end",
-                outcome="replied" if result.success else "reply_failed",
+                outcome="replied" if result else "reply_failed",
                 response=response,
                 mutation_submitted=trace.mutation_submitted,
             )
