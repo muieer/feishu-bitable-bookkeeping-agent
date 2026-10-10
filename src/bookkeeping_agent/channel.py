@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import UTC, datetime
 
@@ -17,6 +18,9 @@ from .tracing import LOG_FAILED, LOG_FAILED_SUFFIX, TraceLogError, emit
 
 logger = logging.getLogger(__name__)
 
+PROCESSING_REACTIONS = ("OneSecond", "Typing", "OnIt")
+REACTION_TIMEOUT_SECONDS = 3
+
 
 def build_channel(settings: Settings) -> FeishuChannel:
     return FeishuChannel(
@@ -25,13 +29,32 @@ def build_channel(settings: Settings) -> FeishuChannel:
         inbound=InboundConfig(emit_raw_events=True),
         safety=SafetyConfig(
             text_batch=TextBatchConfig(delay_ms=0, long_delay_ms=0, max_messages=1),
-            chat_queue=ChatQueueConfig(merge_while_busy=False),
+            chat_queue=ChatQueueConfig(enabled=False, merge_while_busy=False),
         ),
     )
 
 
 def register_handlers(channel: FeishuChannel, service: BookkeepingService) -> None:
     traces = service.traces
+    chat_locks: dict[str, asyncio.Lock] = {}
+
+    async def add_processing_reaction(message_id, emoji_type):
+        emit("reaction.request", emoji_type=emoji_type)
+        try:
+            result = await asyncio.wait_for(
+                channel.add_reaction(message_id, emoji_type), REACTION_TIMEOUT_SECONDS
+            )
+            emit("reaction.result", emoji_type=emoji_type, result=result)
+            if result.success:
+                return
+        except Exception as exc:  # noqa: BLE001 -- Feedback must not prevent bookkeeping.
+            emit("reaction.error", status="error", emoji_type=emoji_type, error=exc)
+        logger.warning("reaction_failed message_id=%s emoji_type=%s", message_id, emoji_type)
+
+    async def acknowledge(message_id):
+        await asyncio.gather(
+            *(add_processing_reaction(message_id, emoji) for emoji in PROCESSING_REACTIONS)
+        )
 
     def on_raw(payload):
         if isinstance(payload.get("event"), dict) and "message" in payload["event"]:
@@ -67,51 +90,63 @@ def register_handlers(channel: FeishuChannel, service: BookkeepingService) -> No
                 emit("message.invalid", status="error", error=exc)
                 logger.warning("message_invalid message_id=%s", message.message_id)
                 return
-            logger.info("message_received message_id=%s", message.message_id)
+            feedback = asyncio.create_task(acknowledge(message.message_id))
+            lock = chat_locks.setdefault(message.chat_id, asyncio.Lock())
             try:
-                response = await service.reply(incoming)
-            except TraceLogError:
+                async with lock:
+                    await feedback
+                    await process_message(message, incoming, trace)
+            finally:
+                if not feedback.done():
+                    feedback.cancel()
+                    await asyncio.gather(feedback, return_exceptions=True)
+
+    async def process_message(message, incoming, trace):
+        logger.info("message_received message_id=%s", message.message_id)
+        try:
+            response = await service.reply(incoming)
+        except TraceLogError:
+            response = LOG_FAILED
+        except Exception as exc:  # noqa: BLE001 -- User feedback never contains raw exceptions.
+            emit("message.service_error", status="error", error=exc)
+            logger.warning(
+                "message_failed message_id=%s kind=%s", message.message_id, type(exc).__name__
+            )
+            response = "处理未完成；如已提交记账，请先核对表格，勿重复发送。"
+        if response is None:
+            emit("message.end", outcome="silent")
+            return
+        emit("reply.generated", response=response)
+        payload, opts = {"text": response}, {"reply_to": message.message_id}
+        emit("reply.request", chat_id=message.chat_id, payload=payload, options=opts)
+        if trace.failed:
+            if trace.mutation_submitted:
+                if LOG_FAILED_SUFFIX not in response:
+                    response += LOG_FAILED_SUFFIX
+            else:
                 response = LOG_FAILED
-            except Exception as exc:  # noqa: BLE001 -- User feedback never contains raw exceptions.
-                emit("message.service_error", status="error", error=exc)
-                logger.warning(
-                    "message_failed message_id=%s kind=%s", message.message_id, type(exc).__name__
-                )
-                response = "处理未完成；如已提交记账，请先核对表格，勿重复发送。"
-            if response is None:
-                emit("message.end", outcome="silent")
-                return
-            emit("reply.generated", response=response)
-            payload, opts = {"text": response}, {"reply_to": message.message_id}
-            emit("reply.request", chat_id=message.chat_id, payload=payload, options=opts)
-            if trace.failed:
-                if trace.mutation_submitted:
-                    if LOG_FAILED_SUFFIX not in response:
-                        response += LOG_FAILED_SUFFIX
-                else:
-                    response = LOG_FAILED
-                payload = {"text": response}
-                logger.error("reply_without_trace message_id=%s", message.message_id)
-            try:
-                result = await channel.send(message.chat_id, payload, opts)
-                emit("reply.result", result=result)
-                logger.log(
-                    logging.INFO if result.success else logging.ERROR,
-                    "reply_sent message_id=%s" if result.success else "reply_failed message_id=%s",
-                    message.message_id,
-                )
-                emit(
-                    "message.end",
-                    outcome="replied" if result.success else "reply_failed",
-                    response=response,
-                    mutation_submitted=trace.mutation_submitted,
-                )
-            except Exception as exc:  # noqa: BLE001 -- Reply failure must not repeat a write.
-                emit("reply.error", status="error", error=exc)
-                logger.error(
-                    "reply_failed message_id=%s kind=%s", message.message_id, type(exc).__name__
-                )
-                emit("message.end", outcome="reply_failed")
+            payload = {"text": response}
+            logger.error("reply_without_trace message_id=%s", message.message_id)
+        try:
+            result = await channel.send(message.chat_id, payload, opts)
+            emit("reply.result", result=result)
+            logger.log(
+                logging.INFO if result.success else logging.ERROR,
+                "reply_sent message_id=%s" if result.success else "reply_failed message_id=%s",
+                message.message_id,
+            )
+            emit(
+                "message.end",
+                outcome="replied" if result.success else "reply_failed",
+                response=response,
+                mutation_submitted=trace.mutation_submitted,
+            )
+        except Exception as exc:  # noqa: BLE001 -- Reply failure must not repeat a write.
+            emit("reply.error", status="error", error=exc)
+            logger.error(
+                "reply_failed message_id=%s kind=%s", message.message_id, type(exc).__name__
+            )
+            emit("message.end", outcome="reply_failed")
 
     async def on_error(error):
         logger.error("channel_error kind=%s", type(error).__name__)

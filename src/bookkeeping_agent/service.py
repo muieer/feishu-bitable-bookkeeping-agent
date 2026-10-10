@@ -105,7 +105,7 @@ class BookkeepingService:
             await self.engine.aclose()
 
     async def _reply(self, message: IncomingMessage) -> str | None:
-        # Queue the entire operation, not just the CLI call. SDK queue is an additional layer.
+        # Queue the entire operation, including calls made outside the channel handler.
         lock = self.locks.setdefault(message.chat_id, asyncio.Lock())
         queued = time.monotonic()
         emit("session.queue", chat_id=message.chat_id, locked=lock.locked())
