@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from .tracing import emit
+
 
 def atomic_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +53,15 @@ class OperationJournal:
         return self.entries.get(self.key(message_id))
 
     def save(self, message_id: str, status: str, **metadata) -> None:
+        emit(
+            "journal.save_start", message_id=message_id, operation_status=status, metadata=metadata
+        )
         updated = dict(self.entries)
         updated[self.key(message_id)] = {"status": status, **metadata}
-        atomic_json(self.path, updated)
+        try:
+            atomic_json(self.path, updated)
+        except BaseException as exc:
+            emit("journal.save_error", status="error", error=exc)
+            raise
         self.entries = updated
+        emit("journal.saved", message_id=message_id, operation_status=status, metadata=metadata)

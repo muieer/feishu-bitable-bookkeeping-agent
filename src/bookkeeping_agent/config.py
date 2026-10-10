@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     preferences_path: Path = Path("knowledge/preferences.json")
     schema_path: Path = Path("knowledge/schema.json")
     operation_journal_path: Path = Path(".runtime/operations.json")
+    log_file_path: Path = Path("logs/service.log")
+    message_log_dir: Path = Path("logs")
     context_ttl_seconds: float = Field(default=1800, gt=0)
     lark_cli_path: str = Field(default="lark-cli", min_length=1)
     lark_cli_identity: Literal["user", "bot"] = "user"

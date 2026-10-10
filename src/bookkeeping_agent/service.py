@@ -17,6 +17,15 @@ from .knowledge import Knowledge, KnowledgeError
 from .models import Decision, Expense, IncomingMessage
 from .storage import OperationJournal
 from .tools import BitableTool, QueryError
+from .tracing import (
+    LOG_FAILED,
+    LOG_FAILED_SUFFIX,
+    TraceLogError,
+    TraceStore,
+    current_trace,
+    emit,
+    require,
+)
 
 UNCERTAIN = "上次写入结果待核对，请先检查表格；本次未再次执行记账。"
 logger = logging.getLogger(__name__)
@@ -37,6 +46,7 @@ class BookkeepingService:
         self, settings: Settings, tool: BitableTool, model: Model | None = None, *, engine=None
     ):
         self.settings = settings
+        self.traces = TraceStore(settings)
         self.tool = tool
         self.knowledge = Knowledge(settings)
         self.engine = engine or DecisionEngine(settings, tool, self.knowledge, model)
@@ -48,14 +58,74 @@ class BookkeepingService:
         self.locks: dict[str, asyncio.Lock] = {}
 
     async def reply(self, message: IncomingMessage) -> str | None:
+        trace = current_trace() or self.traces.claim(message.message_id)
+        with self.traces.scope(trace):
+            logger.info("message_trace message_id=%s path=%s", message.message_id, trace.path)
+            emit("message.normalized", message=message)
+            response = None
+            previous_before_processing = self.journal.get(message.message_id)
+            try:
+                require()
+                response = await self._reply(message)
+            except TraceLogError:
+                previous = self.journal.get(message.message_id)
+                if previous and previous["status"] == "success":
+                    response = trace.response
+                elif (
+                    previous_before_processing
+                    and previous
+                    and previous["status"] in {"started", "uncertain"}
+                ):
+                    trace.mutation_submitted = True
+                    response = UNCERTAIN
+                else:
+                    response = UNCERTAIN if trace.mutation_submitted else LOG_FAILED
+            except BaseException as exc:
+                emit("message.error", status="error", error=exc)
+                raise
+            finally:
+                emit("session.after", session=self.sessions.get((message.user_id, message.chat_id)))
+            emit(
+                "message.result",
+                response=response,
+                silent=response is None,
+                mutation_submitted=trace.mutation_submitted,
+            )
+            if trace.failed and response is not None:
+                if trace.mutation_submitted:
+                    if LOG_FAILED_SUFFIX not in response:
+                        response += LOG_FAILED_SUFFIX
+                else:
+                    response = LOG_FAILED
+            trace.response = response
+            return response
+
+    async def aclose(self):
+        if hasattr(self.engine, "aclose"):
+            await self.engine.aclose()
+
+    async def _reply(self, message: IncomingMessage) -> str | None:
         # Queue the entire operation, not just the CLI call. SDK queue is an additional layer.
         lock = self.locks.setdefault(message.chat_id, asyncio.Lock())
+        queued = time.monotonic()
+        emit("session.queue", chat_id=message.chat_id, locked=lock.locked())
+        require()
         async with lock:
+            emit("session.lock_acquired", wait_ms=(time.monotonic() - queued) * 1000)
+            require()
             previous = self.journal.get(message.message_id)
+            emit("dedup.checked", previous=previous)
+            require()
             if previous:
+                emit("message.deduplicated", reason=previous["status"], previous=previous)
                 return UNCERTAIN if previous["status"] in {"started", "uncertain"} else None
             key = (message.user_id, message.chat_id)
             session = self.sessions.get(key)
+            expired = (
+                session is not None
+                and time.monotonic() - session.touched > self.settings.context_ttl_seconds
+            )
+            emit("session.before", session=session, expired=expired)
             if (
                 session is None
                 or time.monotonic() - session.touched > self.settings.context_ttl_seconds
@@ -103,18 +173,29 @@ class BookkeepingService:
                 else None,
                 "recent_turns": session.turns,
             }
+            emit("decision.context", context=context)
+            require()
             try:
                 decision = await asyncio.wait_for(
                     self.engine.decide(message.text, context),
                     self.settings.agent_timeout_seconds,
                 )
             except TimeoutError:
+                emit(
+                    "decision.timeout",
+                    status="error",
+                    timeout_seconds=self.settings.agent_timeout_seconds,
+                )
                 return "理解消息超时，未执行写入，请稍后重试。"
             except Exception as exc:  # noqa: BLE001 -- Provider messages may contain secrets.
+                emit("decision.error", status="error", error=exc)
                 logger.warning("agent_failed kind=%s", type(exc).__name__)
                 return "消息理解失败，未执行写入，请检查模型配置和网络连接。"
+            emit("decision.branch", decision=decision)
             if decision.action == "ignore":
+                emit("message.ignored", reason="decision_ignore")
                 return None
+            require()
             if not decision.continues_pending:
                 session.pending = None
             elif session.pending:
@@ -137,6 +218,7 @@ class BookkeepingService:
     def _ask(
         self, session: Session, message: IncomingMessage, decision: Decision, question: str
     ) -> str:
+        emit("business.clarify", question=question, decision=decision)
         # Keep all facts in the bounded dialogue, and preserve the original date anchor.
         if session.pending is None:
             session.pending = {
@@ -157,11 +239,17 @@ class BookkeepingService:
         session.pending = None
         session.turns.extend([{"user": message.text}, {"result": response}])
         session.turns[:] = session.turns[-6:]
+        emit("business.completed", response=response, session=session)
+        trace = current_trace()
+        if trace:
+            trace.response = response
 
     async def _preference(
         self, session: Session, message: IncomingMessage, decision: Decision
     ) -> str:
         preference = decision.preference
+        emit("preference.input", preference=preference)
+        require()
         source = message.text + "\n" + (session.pending["text"] if session.pending else "")
         # Evidence must be a verbatim user statement of an ongoing preference.
         if preference.evidence not in source or not any(
@@ -174,12 +262,21 @@ class BookkeepingService:
         try:
             async with self.tool.write_lock:
                 self.knowledge.validate_category(preference.category)
+                emit("preference.write_planned", preference=preference, durable=True)
+                require()
                 self.journal.save(message.message_id, "started", action="preference")
+                require()
+                trace = current_trace()
+                if trace:
+                    trace.mutation_submitted = True
                 self.knowledge.update_preference(preference)
+                emit("preference.saved", preference=preference)
                 self.journal.save(message.message_id, "success", action="preference")
         except KnowledgeError as exc:
+            emit("preference.validation_failed", status="error", error=exc)
             return self._ask(session, message, decision, str(exc))
-        except OSError:
+        except OSError as exc:
+            emit("preference.save_failed", status="error", error=exc)
             return "分类偏好保存未确认成功，请检查本地文件权限；本次未修改账单。"
         response = (
             f"已保存分类偏好：{preference.condition} → {category_label(preference.category)}。"
@@ -216,6 +313,8 @@ class BookkeepingService:
             values.update(patch)
         else:
             values = {"date": default_date, **patch}
+        emit("expense.merged", values=values, patch=patch, action=decision.action)
+        require()
         try:
             expense = Expense.model_validate(values)
             self.knowledge.validate_category(expense.category)
@@ -224,9 +323,12 @@ class BookkeepingService:
                 > message.sent_at.astimezone(ZoneInfo(self.settings.display_timezone)).date()
             ):
                 raise KnowledgeError("消费日期在未来，请确认实际消费日期。")
+            emit("expense.validated", expense=expense)
         except KnowledgeError as exc:
+            emit("expense.validation_failed", status="error", error=exc)
             return self._ask(session, message, decision, str(exc))
         except ValidationError as exc:
+            emit("expense.validation_failed", status="error", error=exc)
             labels = {
                 "amount": "有效金额（正数，最多两位小数）",
                 "description": "消费内容",
@@ -238,10 +340,20 @@ class BookkeepingService:
                 session, message, decision, "请补充或确认：" + "、".join(missing) + "。"
             )
         record_id = session.last_record_id if decision.action == "update" else None
+        require()
+        lock_started = time.monotonic()
+        emit("table.queue", record_id=record_id)
         async with self.tool.write_lock:
+            emit("table.lock_acquired", wait_ms=(time.monotonic() - lock_started) * 1000)
+            require()
             # Failures here are read-only: no journal reservation or mutation yet.
             try:
-                self.knowledge.validate_schema(await self.tool.field_schema())
+                schema = await self.tool.field_schema()
+                emit("table.schema", schema=schema)
+                require()
+                self.knowledge.validate_schema(schema)
+                emit("table.schema_validated", schema=schema)
+                require()
                 if record_id:
                     actual = await self.tool.get_record(record_id)
                     original = self.tool.expense_fields(session.last_expense)
@@ -249,13 +361,23 @@ class BookkeepingService:
                     for name in self.tool.expense_fields(expense):
                         if not same_field(name, actual.get(name), original[name], self.settings):
                             raise QueryError("最近账单已被外部修改，请核对表格后再纠错。")
+                    emit("table.correction_preflight", actual=actual, original=original)
             except (QueryError, KnowledgeError) as exc:
+                emit("table.preflight_failed", status="error", error=exc)
                 return str(exc)
+            emit(
+                "table.write_planned",
+                record_id=record_id,
+                fields=self.tool.expense_fields(expense),
+                durable=True,
+            )
+            require()
             try:
                 self.journal.save(message.message_id, "started", action=decision.action)
             except OSError:
                 return "无法保存去重状态，未执行写入，请检查本地文件权限。"
             try:
+                require()
                 if record_id:
                     fields = self.tool.expense_fields(expense)
                     before = self.tool.expense_fields(session.last_expense)
@@ -263,16 +385,21 @@ class BookkeepingService:
                         name: value for name, value in fields.items() if value != before[name]
                     }
                     if changed:
+                        emit("table.changed_fields", changed=changed)
+                        require()
                         await self.tool.update_record(record_id, changed)
                 else:
                     record_id = await self.tool.create_record(expense)
             except asyncio.CancelledError:
                 # Reservation remains on disk even if the process exits before cleanup.
                 session.uncertain = True
+                emit("table.cancelled", status="error")
                 raise
             except Exception as exc:  # noqa: BLE001 -- Every post-reservation failure is uncertain.
+                emit("table.write_failed", status="error", error=exc)
                 session.uncertain = True
                 return str(exc) if isinstance(exc, QueryError) else UNCERTAIN
+            emit("table.confirmed", record_id=record_id, expense=expense)
             # If saving fails after remote success, the durable 'started' prevents another create.
             response = (
                 f"{'已修改' if decision.action == 'update' else '已记账'}："

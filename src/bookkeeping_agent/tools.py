@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import shutil
+import time as monotonic_time
 from datetime import datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from .config import Settings
 from .models import Expense
+from .tracing import current_trace, emit, require
 
 logger = logging.getLogger(__name__)
 RecordCount = Annotated[int, Field(strict=True, ge=1, le=100)]
@@ -53,6 +55,7 @@ class BitableTool:
         self.write_lock = asyncio.Lock()
 
     async def _run(self, command: str, args: list[str], directory: str, *, write=False) -> dict:
+        require(reconciliation=not write)
         s = self.settings
         executable = shutil.which(s.lark_cli_path)
         if executable is None:
@@ -69,6 +72,11 @@ class BitableTool:
             s.lark_cli_identity,
             *args,
         ]
+        emit("cli.start", argv=argv, directory=directory, write=write, durable=write)
+        require(reconciliation=not write)
+        started = monotonic_time.monotonic()
+        trace = current_trace()
+        already_submitted = trace.mutation_submitted if trace else False
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -77,14 +85,31 @@ class BitableTool:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            if write and trace:
+                trace.mutation_submitted = True
         except OSError as exc:
+            if trace:
+                trace.mutation_submitted = already_submitted
+            emit("cli.spawn_error", status="error", error=exc)
             raise QueryError("无法启动 lark-cli，请检查安装位置和执行权限。") from exc
+        communication = asyncio.create_task(process.communicate())
         try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), s.cli_timeout_seconds)
+            stdout, stderr = await asyncio.wait_for(
+                asyncio.shield(communication), s.cli_timeout_seconds
+            )
         except (TimeoutError, asyncio.CancelledError) as exc:
             if process.returncode is None:
                 process.kill()
-            await process.communicate()
+            stdout, stderr = await communication
+            emit(
+                "cli.interrupted",
+                status="error",
+                error=exc,
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=process.returncode,
+                duration_ms=(monotonic_time.monotonic() - started) * 1000,
+            )
             if isinstance(exc, asyncio.CancelledError):
                 raise
             if write:
@@ -92,6 +117,14 @@ class BitableTool:
                     "写入超时，结果待核对；请先检查表格，勿重复发送记账。"
                 ) from exc
             raise QueryError("多维表格查询超时，请稍后重试。") from exc
+        emit(
+            "cli.result",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=process.returncode,
+            duration_ms=(monotonic_time.monotonic() - started) * 1000,
+        )
+        require(reconciliation=not write or bool(trace and trace.mutation_submitted))
         if process.returncode:
             logger.warning("cli_failed command=%s exit_code=%s", command, process.returncode)
             if write:
@@ -101,6 +134,7 @@ class BitableTool:
             summary = json.loads(stdout)
             if not isinstance(summary, dict) or summary.get("ok") is not True:
                 raise ValueError("CLI did not confirm success")
+            emit("cli.parsed", summary=summary)
             return summary
         except (ValueError, TypeError) as exc:
             if write:
@@ -119,22 +153,31 @@ class BitableTool:
     async def _rows(self, command: str, args: list[str], *, categories=False) -> list[dict]:
         with TemporaryDirectory(prefix="bookkeeping-") as directory:
             output = Path(directory) / "records.ndjson"
-            await self._run(
-                command,
-                [
-                    *args,
-                    *self.projected_fields(categories=categories),
-                    "--format",
-                    "ndjson",
-                    "--output",
-                    output.name,
-                ],
-                directory,
-            )
             try:
+                await self._run(
+                    command,
+                    [
+                        *args,
+                        *self.projected_fields(categories=categories),
+                        "--format",
+                        "ndjson",
+                        "--output",
+                        output.name,
+                    ],
+                    directory,
+                )
+            finally:
+                if output.exists():
+                    try:
+                        emit("cli.output_file", filename=output.name, content=output.read_bytes())
+                    except OSError as exc:
+                        emit("cli.output_file_error", status="error", error=exc)
+            try:
+                contents = output.read_text(encoding="utf-8")
+                require(reconciliation=True)
                 return [
                     json.loads(line, parse_float=Decimal)
-                    for line in output.read_text(encoding="utf-8").splitlines()
+                    for line in contents.splitlines()
                     if line.strip()
                 ]
             except (OSError, ValueError, TypeError) as exc:
@@ -264,6 +307,8 @@ class BitableTool:
         }
 
     async def _write(self, command: str, payload: dict) -> dict:
+        emit("cli.write_payload", command=command, payload=payload, body=exact_json(payload))
+        require()
         with TemporaryDirectory(prefix="bookkeeping-") as directory:
             path = Path(directory) / "payload.json"
             path.write_text(exact_json(payload), encoding="utf-8")
@@ -289,6 +334,7 @@ class BitableTool:
         await self._write("+record-batch-update", {"update_records": {record_id: fields}})
         try:
             actual = await self.get_record(record_id)
+            emit("table.update_verification", record_id=record_id, expected=fields, actual=actual)
             for name, expected in fields.items():
                 value = actual.get(name)
                 if name == self.settings.bitable_date_field:
