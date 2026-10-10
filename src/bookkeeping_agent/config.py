@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     bitable_base_token: str = Field(min_length=1)
     bitable_table_id: str = Field(min_length=1)
     bitable_view_id: str = ""
+    test_mode: bool = False
     bitable_date_field: str = Field(default="记账日期", min_length=1)
     bitable_amount_field: str = Field(default="金额", min_length=1)
     bitable_description_field: str = Field(default="具体", min_length=1)

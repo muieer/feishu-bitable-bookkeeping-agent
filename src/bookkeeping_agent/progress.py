@@ -72,6 +72,7 @@ class ProgressState:
     expense: object = None
     preference: object = None
     confirmed: bool = False
+    prepared: bool = False
     completed_response: str | None = None
     response: str | None = None
     title: str = "处理结果"
@@ -168,6 +169,9 @@ class ProgressState:
         elif stage == "table.update_verification_start":
             self.complete("write")
             self.begin("verify", "修改已提交，正在核对表格中的实际结果。", "已确认修改结果")
+        elif stage == "table.prepared":
+            self.prepared = True
+            self.expense = data["expense"]
         elif stage == "table.confirmed":
             self.confirmed = True
             self.expense = data["expense"]
@@ -218,6 +222,8 @@ class ProgressState:
             self.title = (
                 "已保存分类偏好"
                 if self.preference
+                else "准备记账"
+                if self.prepared
                 else "已修改"
                 if self.action == "update"
                 else "已记账"

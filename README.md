@@ -46,6 +46,7 @@ cp .env.example .env
 | `ARK_API_KEY`、`ARK_MODEL` | 方舟 API Key 和模型或推理接入点 ID，必填 |
 | `ARK_BASE_URL` | 默认为 `https://ark.cn-beijing.volces.com/api/v3` |
 | `BITABLE_BASE_TOKEN`、`BITABLE_TABLE_ID` | 现有 Base token 和表 ID，必填；表 ID 必须与知识文件一致 |
+| `TEST_MODE` | 布尔值，默认 `false`；设为 `true` 时不新增或修改多维表格记录，文字和卡片结果显示「准备记账」。仍执行消息理解、校验及只读查询，长期分类偏好仍按原流程保存 |
 | `BITABLE_DATE_FIELD`、`BITABLE_AMOUNT_FIELD`、`BITABLE_DESCRIPTION_FIELD` | 默认「记账日期」「金额」「具体」 |
 | `BITABLE_CATEGORY1_FIELD`、`BITABLE_CATEGORY2_FIELD`、`BITABLE_CATEGORY3_FIELD` | 默认「一级分类」「二级分类」「三级分类」 |
 | `AGENT_SYSTEM_PROMPT_PATH` | 默认 `prompts/system.md`，UTF-8；也可配置绝对路径 |

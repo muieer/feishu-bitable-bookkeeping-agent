@@ -52,7 +52,8 @@ class BookkeepingService:
         self.engine = engine or DecisionEngine(settings, tool, self.knowledge, model)
         self.journal = OperationJournal(
             settings.operation_journal_path,
-            f"{settings.bitable_base_token}/{settings.bitable_table_id}",
+            f"{settings.bitable_base_token}/{settings.bitable_table_id}"
+            + ("/test" if settings.test_mode else ""),
         )
         self.sessions: dict[tuple[str, str], Session] = {}
         self.locks: dict[str, asyncio.Lock] = {}
@@ -293,7 +294,9 @@ class BookkeepingService:
         if decision.action == "update":
             if session.uncertain:
                 return UNCERTAIN
-            if not session.last_record_id or not session.last_expense:
+            if not session.last_expense or (
+                not self.settings.test_mode and not session.last_record_id
+            ):
                 return self._ask(
                     session,
                     message,
@@ -366,6 +369,24 @@ class BookkeepingService:
             except (QueryError, KnowledgeError) as exc:
                 emit("table.preflight_failed", status="error", error=exc)
                 return str(exc)
+            if self.settings.test_mode:
+                emit("table.prepared", expense=expense, action=decision.action)
+                require()
+                response = (
+                    f"准备记账：{expense.date.isoformat()} | {expense.amount:.2f} 元 | "
+                    f"{expense.description} | {category_label(expense.category)}。"
+                )
+                try:
+                    self.journal.save(
+                        message.message_id, "success", action=decision.action, test_mode=True
+                    )
+                except OSError:
+                    return "无法保存去重状态，未执行写入，请检查本地文件权限。"
+                session.last_record_id = None
+                session.last_expense = expense
+                session.uncertain = False
+                self._done(session, message, response)
+                return response
             emit(
                 "table.write_planned",
                 record_id=record_id,
