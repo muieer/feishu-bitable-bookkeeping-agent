@@ -122,7 +122,7 @@ def main() -> None:
         parser.exit(2, f"配置缺失或无效：{fields}。请参照 .env.example 配置。\n")
     try:
         configure_logging(settings.log_file_path)
-        TraceStore(settings)
+        trace_store = TraceStore(settings)
     except OSError:
         parser.exit(
             2, "无法创建或打开运行日志，请检查 LOG_FILE_PATH、MESSAGE_LOG_DIR 和目录写入权限。\n"
@@ -131,7 +131,7 @@ def main() -> None:
     logger.info(
         "application_started log_file=%s message_log_dir=%s",
         settings.log_file_path.resolve(),
-        settings.message_log_dir.resolve(),
+        trace_store.directory,
     )
     if not shutil.which(settings.lark_cli_path):
         logger.error("startup_failed kind=MissingCLI")

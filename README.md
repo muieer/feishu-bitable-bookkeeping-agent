@@ -53,7 +53,7 @@ cp .env.example .env
 | `PREFERENCES_PATH` | 默认 `knowledge/preferences.json`，首次更新长期偏好时自动创建 |
 | `OPERATION_JOURNAL_PATH` | 默认 `.runtime/operations.json`，写入去重日志 |
 | `LOG_FILE_PATH` | 默认 `logs/service.log`，总运行日志；已有显式配置继续生效，父目录自动创建 |
-| `MESSAGE_LOG_DIR` | 默认 `logs`，每条消息的完整处理日志目录；支持绝对路径 |
+| `MESSAGE_LOG_DIR` | 默认 `logs`，所有消息日志统一保存在其 `messages/` 子目录；支持绝对路径 |
 | `CONTEXT_TTL_SECONDS` | 默认 `1800`；追问、最近账单和最近对话的内存有效期 |
 | `DISPLAY_TIMEZONE` | 默认 `Asia/Shanghai`；用于解析和写入日期 |
 | `LARK_CLI_PATH`、`LARK_CLI_IDENTITY` | 默认 `lark-cli`、`user` |
@@ -88,7 +88,7 @@ lark-cli auth status --json --verify
 
 ## 启动与检查
 
-程序将总运行日志同时输出到终端和 `LOG_FILE_PATH` 指定的文件，以 UTF-8 编码追加，保留已有内容。在项目根目录启动时，默认总日志为 `logs/service.log`，消息日志保存在 `logs/`。启动日志中的 `application_started` 显示两个路径的实际绝对位置。相对路径基于启动目录；已有 `.env` 显式配置的 `LOG_FILE_PATH` 继续生效。日志目录或文件不可用时，程序提示错误并停止启动。修改配置或程序后需重启。
+程序将总运行日志同时输出到终端和 `LOG_FILE_PATH` 指定的文件，以 UTF-8 编码追加，保留已有内容。在项目根目录启动时，默认总日志为 `logs/service.log`，消息日志统一保存在 `logs/messages/`。启动日志中的 `application_started` 显示两个路径的实际绝对位置。相对路径基于启动目录；已有 `.env` 显式配置的 `LOG_FILE_PATH` 继续生效。日志目录或文件不可用时，程序提示错误并停止启动。修改配置或程序后需重启。
 
 总日志记录启动、连接、消息日志路径、回复结果和日志系统错误。业务日志记录 INFO 及以上级别，第三方日志默认记录 WARNING 及以上级别。无需再将终端输出重定向到同一个日志文件，以免重复记录。
 
@@ -117,7 +117,7 @@ bookkeeping-agent --ask '今天外卖午饭25元'
 
 ## 按消息排查完整链路
 
-每条消息对应 `MESSAGE_LOG_DIR` 下一个可直接阅读的 `.log` 文件，文件名为清理后的消息 ID 加固定哈希后缀。同一消息重投递或进程重启后追加到同一文件。缺少消息 ID 时使用事件 ID；两者都缺失时生成诊断 ID。应用不补造历史日志，不自动删除日志；`logs/` 已加入 Git 忽略规则。
+所有消息日志统一保存在 `MESSAGE_LOG_DIR/messages/`，默认路径为 `logs/messages/`，不再按消息创建子目录。每次消息投递创建一个可直接阅读的 `.log` 文件，文件名采用 `yyyyMMdd_HH:mm_ss.log`，例如 `20261010_14:30_05.log`，时间使用 `DISPLAY_TIMEZONE`。若文件名已存在，按秒递增至可用文件名，避免不同消息混写；日志内容中的时间戳保留实际记录时间。单次投递的后续记录追加到同一文件，重投递或重启后创建新文件。缺少消息 ID 时使用事件 ID；两者都缺失时生成诊断 ID。应用不迁移旧格式日志，不补造历史日志，不自动删除日志；`logs/` 已加入 Git 忽略规则。
 
 每个事件包含时间、阶段、状态、累计耗时和缩进展开的 JSON 明细；有开始与结束的操作还记录单次耗时。`delivery_id` 区分投递，`agent_run_id` 区分 Agent run，`phase` 区分意图判断和历史补全，`loop`、`http_attempt`、`tool_call_id` 关联循环、HTTP 尝试和工具调用。消息正文和业务结果不截断，金额保留精度。日志按文件串行追加并刷新，业务写入前的检查点执行落盘同步。
 

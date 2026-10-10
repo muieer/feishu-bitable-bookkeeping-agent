@@ -2,7 +2,6 @@
 
 import base64
 import dataclasses
-import hashlib
 import json
 import logging
 import math
@@ -17,7 +16,7 @@ import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -160,9 +159,9 @@ class MessageTrace:
     def __init__(self, store, message_id):
         self.store = store
         self.message_id = message_id
-        safe = re.sub(r"[^A-Za-z0-9_-]", "_", message_id)[:100] or "message"
-        digest = hashlib.sha256(message_id.encode()).hexdigest()[:12]
-        self.path = store.directory / f"{safe}--{digest}.log"
+        self.file_time = datetime.now(ZoneInfo(store.timezone))
+        self.path = store.directory / self.file_time.strftime("%Y%m%d_%H:%M_%S.log")
+        self.file_created = False
         self.delivery_id = uuid.uuid4().hex
         self.sequence = 0
         self.started = time.monotonic()
@@ -197,7 +196,21 @@ class MessageTrace:
                 record = redact(record, self.store.secrets)
                 entry = f"\n=== {record['timestamp']} {stage} [{status}] ===\n"
                 entry += json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                if self.file_created:
+                    fd = os.open(self.path, os.O_WRONLY | os.O_APPEND)
+                else:
+                    while True:
+                        try:
+                            fd = os.open(
+                                self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600
+                            )
+                            self.file_created = True
+                            break
+                        except FileExistsError:
+                            self.file_time += timedelta(seconds=1)
+                            self.path = self.store.directory / self.file_time.strftime(
+                                "%Y%m%d_%H:%M_%S.log"
+                            )
                 with os.fdopen(fd, "a", encoding="utf-8") as out:
                     out.write(entry)
                     out.flush()
@@ -222,7 +235,7 @@ class MessageTrace:
 
 class TraceStore:
     def __init__(self, settings):
-        self.directory = settings.message_log_dir.resolve()
+        self.directory = settings.message_log_dir.resolve() / "messages"
         self.directory.mkdir(parents=True, exist_ok=True)
         # Check actual write access rather than relying on permission bits alone.
         with tempfile.TemporaryFile(dir=self.directory):
