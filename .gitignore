@@ -19,4 +19,7 @@ dist/
 *.pem
 *.key
 
-knowledge/
+/knowledge/*
+!/knowledge/categories.example.json
+!/knowledge/rules.example.json
+!/knowledge/schema.example.json

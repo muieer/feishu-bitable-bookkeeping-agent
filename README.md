@@ -62,7 +62,17 @@ cp .env.example .env
 | `AGENT_TIMEOUT_SECONDS` | 默认 `90`；模型理解阶段的超时，不中断已提交的写入 |
 | `BITABLE_VIEW_ID` | 仅用于 `--query` 只读诊断；记账和历史分类检索针对整张目标表 |
 
-默认分类知识沿用本地 `knowledge` 文件。`schema.json` 已从项目附件复制到该目录。当前 `knowledge/` 沿用原有 Git 忽略设置，复制项目到其他机器时需一并提供这些文件。不要用通用分类标准覆盖个人分类树或原始规则。
+默认分类知识读取本地 `knowledge` 文件。仓库提供三个结构一致的虚构模板：`categories.example.json`（分类树）、`rules.example.json`（分类规则）和 `schema.example.json`（表结构）。模板包含演示分类与虚构消费例句，历史样本数均为 0，表 ID 和字段 ID 均为示例占位值。个人知识文件及运行时生成的 `preferences.json` 继续由 Git 忽略。
+
+新环境中，确认对应的本地文件尚不存在后，复制模板：
+
+```bash
+cp knowledge/categories.example.json knowledge/categories.json
+cp knowledge/rules.example.json knowledge/rules.json
+cp knowledge/schema.example.json knowledge/schema.json
+```
+
+使用前，将 `categories.json` 和 `schema.json` 中的表 ID 与 `.env` 的 `BITABLE_TABLE_ID` 设为同一真实目标表 ID，并将表结构中的字段 ID、名称、类型和选项调整为目标表的实际配置。分类树、规则路径及表格分类选项须保持一致，规则的 `compatible_categories_version` 须与分类树的 `version` 一致。已有个人知识文件时保留原文件，不要用模板覆盖。
 
 ## 放入系统提示词
 

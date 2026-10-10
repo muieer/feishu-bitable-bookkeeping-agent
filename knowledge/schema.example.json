@@ -1,0 +1,177 @@
+{
+  "tables": [
+    {
+      "id": "tblExampleLedger",
+      "name": "示例账本",
+      "fields": [
+        {
+          "default_value": null,
+          "id": "fldExample01",
+          "name": "金额",
+          "style": {
+            "percentage": false,
+            "precision": 2,
+            "thousands_separator": false,
+            "type": "plain"
+          },
+          "type": "number"
+        },
+        {
+          "default_value": null,
+          "id": "fldExample02",
+          "multiple": false,
+          "name": "一级分类",
+          "options": [
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "日常餐饮"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "出行支出"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "学习支出"
+            }
+          ],
+          "type": "select"
+        },
+        {
+          "expression": "WEEKNUM([记账日期])",
+          "id": "fldExample03",
+          "name": "周数",
+          "type": "formula"
+        },
+        {
+          "default_value": null,
+          "id": "fldExample04",
+          "name": "记账日期",
+          "style": {
+            "format": "yyyy/MM/dd"
+          },
+          "type": "datetime"
+        },
+        {
+          "id": "fldExample05",
+          "name": "图片",
+          "style": {
+            "type": "plain"
+          },
+          "type": "attachment"
+        },
+        {
+          "expression": "MONTH([记账日期])",
+          "id": "fldExample06",
+          "name": "月份",
+          "type": "formula"
+        },
+        {
+          "default_value": null,
+          "id": "fldExample07",
+          "multiple": false,
+          "name": "二级分类",
+          "options": [
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "正餐"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "饮品"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "公共交通"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "出租出行"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "阅读资料"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "技能课程"
+            }
+          ],
+          "type": "select"
+        },
+        {
+          "default_value": null,
+          "id": "fldExample08",
+          "name": "具体",
+          "style": {
+            "type": "plain"
+          },
+          "type": "text"
+        },
+        {
+          "default_value": null,
+          "id": "fldExample09",
+          "multiple": false,
+          "name": "支出频率",
+          "options": [
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "偶发"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "定期"
+            }
+          ],
+          "type": "select"
+        },
+        {
+          "expression": "YEAR([记账日期])",
+          "id": "fldExample10",
+          "name": "年份",
+          "type": "formula"
+        },
+        {
+          "default_value": null,
+          "id": "fldExample11",
+          "multiple": false,
+          "name": "三级分类",
+          "options": [
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "店内用餐"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "配送用餐"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "轨道交通"
+            },
+            {
+              "hue": "Blue",
+              "lightness": "Lighter",
+              "name": "公交出行"
+            }
+          ],
+          "type": "select"
+        }
+      ]
+    }
+  ]
+}

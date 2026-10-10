@@ -1,0 +1,71 @@
+{
+  "version": "1.0.0",
+  "table_name": "示例账本",
+  "table_id": "tblExampleLedger",
+  "levels": [
+    "一级分类",
+    "二级分类",
+    "三级分类"
+  ],
+  "constraints": {
+    "allow_new_categories": false,
+    "require_valid_parent_child_path": true,
+    "third_level": "有三级子节点时选择合法三级分类，否则填 null。",
+    "unresolved": "无法确认分类路径时追问用户。"
+  },
+  "tree": [
+    {
+      "name": "日常餐饮",
+      "children": [
+        {
+          "name": "正餐",
+          "children": [
+            {
+              "name": "店内用餐"
+            },
+            {
+              "name": "配送用餐"
+            }
+          ]
+        },
+        {
+          "name": "饮品",
+          "children": []
+        }
+      ]
+    },
+    {
+      "name": "出行支出",
+      "children": [
+        {
+          "name": "公共交通",
+          "children": [
+            {
+              "name": "轨道交通"
+            },
+            {
+              "name": "公交出行"
+            }
+          ]
+        },
+        {
+          "name": "出租出行",
+          "children": []
+        }
+      ]
+    },
+    {
+      "name": "学习支出",
+      "children": [
+        {
+          "name": "阅读资料",
+          "children": []
+        },
+        {
+          "name": "技能课程",
+          "children": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,163 @@
+{
+  "version": "1.0.0",
+  "status": "draft",
+  "compatible_categories_version": "1.0.0",
+  "source": "完全虚构的演示数据，不来源于个人账单。",
+  "decision_policy": {
+    "priority": [
+      "确认消费内容与实际用途。",
+      "使用明确匹配的规则。",
+      "仅选择已有分类路径。",
+      "无法确定时追问。"
+    ],
+    "do_not_infer_from": [
+      "仅有商家名称",
+      "仅有平台名称",
+      "仅有金额",
+      "未说明内容的付款消息"
+    ],
+    "do_not_create_new_category": true,
+    "validate_category_against_categories_json": true,
+    "third_level": "有三级子节点时选择合法三级分类，否则填 null。",
+    "when_ambiguous": {
+      "action": "ask_user",
+      "write_record": false,
+      "default_category": null,
+      "ask_only_required_information": true
+    },
+    "when_no_rule_matches": {
+      "action": "semantic_judgment_with_existing_categories_only",
+      "if_uncertain": "ask_user",
+      "write_record_if_uncertain": false
+    },
+    "category_label_precedence": "根据消费内容和用途判断，不以商家名称或金额单独决定分类。"
+  },
+  "rules": [
+    {
+      "id": "R001",
+      "condition": "明确在店内支付自己的正餐费用。",
+      "category": [
+        "日常餐饮",
+        "正餐",
+        "店内用餐"
+      ],
+      "historical_examples": [
+        "在示例餐厅吃面付款 24 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    },
+    {
+      "id": "R002",
+      "condition": "明确支付配送正餐费用。",
+      "category": [
+        "日常餐饮",
+        "正餐",
+        "配送用餐"
+      ],
+      "historical_examples": [
+        "订了一份配送午餐，付款 27 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    },
+    {
+      "id": "R003",
+      "condition": "明确购买自己饮用的饮品。",
+      "category": [
+        "日常餐饮",
+        "饮品",
+        null
+      ],
+      "historical_examples": [
+        "买果汁付款 12 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    },
+    {
+      "id": "R004",
+      "condition": "明确乘坐轨道交通并支付车费。",
+      "category": [
+        "出行支出",
+        "公共交通",
+        "轨道交通"
+      ],
+      "historical_examples": [
+        "乘地铁付款 5 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    },
+    {
+      "id": "R005",
+      "condition": "明确乘坐公交并支付车费。",
+      "category": [
+        "出行支出",
+        "公共交通",
+        "公交出行"
+      ],
+      "historical_examples": [
+        "乘公交付款 2 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    },
+    {
+      "id": "R006",
+      "condition": "明确支付出租车或网约车费用。",
+      "category": [
+        "出行支出",
+        "出租出行",
+        null
+      ],
+      "historical_examples": [
+        "乘出租车付款 32 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    },
+    {
+      "id": "R007",
+      "condition": "明确购买供自己阅读的资料。",
+      "category": [
+        "学习支出",
+        "阅读资料",
+        null
+      ],
+      "historical_examples": [
+        "买了一本示例读物付款 40 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    },
+    {
+      "id": "R008",
+      "condition": "明确购买用于学习技能的课程。",
+      "category": [
+        "学习支出",
+        "技能课程",
+        null
+      ],
+      "historical_examples": [
+        "报名示例绘画课付款 120 元。"
+      ],
+      "historical_count": 0,
+      "boundary": "消费内容或用途不明确时追问；不根据商家名称推断。"
+    }
+  ],
+  "clarification_triggers": [
+    {
+      "id": "Q001",
+      "if": "只有商家名称，没有消费内容。",
+      "ask": "这笔付款购买了什么？"
+    },
+    {
+      "id": "Q002",
+      "if": "只说明正餐，未说明用餐方式。",
+      "ask": "这笔正餐是在店内吃，还是配送用餐？"
+    }
+  ],
+  "review_note": "仅用于演示结构，正式使用前按自己的分类约定调整。",
+  "examples_note": "例句与金额全部虚构；historical_count 为 0，表示无真实历史样本。"
+}
