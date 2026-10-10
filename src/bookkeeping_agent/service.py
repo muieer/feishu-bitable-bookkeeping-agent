@@ -194,7 +194,7 @@ class BookkeepingService:
             emit("decision.branch", decision=decision)
             if decision.action == "ignore":
                 emit("message.ignored", reason="decision_ignore")
-                return None
+                return "这条消息未涉及实际消费，本次未记账。"
             require()
             if not decision.continues_pending:
                 session.pending = None
