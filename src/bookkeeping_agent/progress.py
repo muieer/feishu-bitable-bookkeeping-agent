@@ -218,9 +218,6 @@ class ProgressState:
                 self.begin("write", "正在修改最近一笔账单。", "已提交账单修改")
             else:
                 self.begin("write", "正在将这笔消费写入表格。", "已写入账单")
-        elif stage == "table.update_verification_start":
-            self.complete("write")
-            self.begin("verify", "修改已提交，正在核对表格中的实际结果。", "已确认修改结果")
         elif stage == "table.prepared":
             self.prepared = True
             self.expense = data["expense"]
@@ -228,7 +225,6 @@ class ProgressState:
             self.confirmed = True
             self.expense = data["expense"]
             self.complete("write")
-            self.complete("verify")
         elif stage == "preference.write_planned":
             self.begin("preference", "正在保存这条分类偏好。", "已保存分类偏好")
         elif stage == "preference.saved":
@@ -249,7 +245,7 @@ class ProgressState:
         elif stage == "table.preflight_failed":
             self.fail("correction" if any(s.key == "correction" for s in self.steps) else "schema")
         elif stage == "table.write_failed":
-            self.fail("verify" if any(s.key == "verify" for s in self.steps) else "write")
+            self.fail("write")
         elif stage == "preference.save_failed":
             self.fail("preference")
 
@@ -261,7 +257,6 @@ class ProgressState:
             "table.lock_acquired": ("schema", "检查表格字段和分类选项"),
             "table.correction_check": ("correction", "核对待修改账单"),
             "table.write_planned": ("write", "写入或修改账单"),
-            "table.update_verification_start": ("verify", "核对修改结果"),
             "preference.write_planned": ("preference", "保存分类偏好"),
         }
         completions = {
@@ -301,16 +296,6 @@ class ProgressState:
         if stage == "table.confirmed":
             self.batch_processed += 1
             self.confirmed = True
-            verification = next(
-                (step for step in self.steps if step.key == "verify" and step.status == "running"),
-                None,
-            )
-            if verification:
-                self.batch_stage_counts["verify"] = self.batch_stage_counts.get("verify", 0) + 1
-                verification.completed = (
-                    f"核对修改结果：已完成 {self.batch_stage_counts['verify']} 笔"
-                )
-            self.complete("verify")
         elif stage == "table.prepared":
             self.prepared = True
             self.batch_processed += 1

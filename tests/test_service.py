@@ -235,14 +235,49 @@ async def test_correction_only_changes_patch_and_clears_third_level(settings, fa
     assert not settings.preferences_path.exists()
 
 
-@pytest.mark.parametrize("mode", ["external_edit", "update_not_applied", "ignored_fields"])
-async def test_correction_checks_remote_before_and_after(settings, fake_cli, monkeypatch, mode):
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "external_edit",
+        "ignored_fields",
+        "missing_id",
+        "wrong_id",
+        "empty_ids",
+        "duplicate_ids",
+        "extra_ids",
+        "invalid_ids",
+        "write_failure",
+    ],
+)
+async def test_correction_rejects_external_changes_or_unconfirmed_response(
+    settings, fake_cli, monkeypatch, mode
+):
     s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
     await s.reply(message())
     monkeypatch.setenv("FAKE_CLI_MODE", mode)
     response = await s.reply(message("改为28元", message_id="om_2"))
-    assert "已修改" not in response and "核对" in response
+    assert "已修改" not in response
+    assert "核对" in response or "未确认成功" in response
     assert bill(s).status == ("failed" if mode == "external_edit" else "uncertain")
+
+
+async def test_correction_confirms_response_without_readback(settings, fake_cli, monkeypatch):
+    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
+    await s.reply(message())
+    monkeypatch.setenv("FAKE_CLI_MODE", "update_not_applied")
+    response = await s.reply(message("改为28元", message_id="om_2"))
+    assert "已修改" in response and "28元" in response
+    assert bill(s).status == "success" and str(bill(s).confirmed.amount) == "28"
+    assert s.journal.get(bill(s).operation_id)["status"] == "success"
+    calls = [
+        json.loads(line)
+        for line in Path(fake_cli[0]).with_name("calls.jsonl").read_text().splitlines()
+    ]
+    commands = [call["args"][1] for call in calls]
+    assert commands.count("+record-get") == 1
+    assert commands[-1] == "+record-batch-update"
+    assert written(fake_cli)[0]["金额"] == 18.1
+    assert await s.reply(message("改为28元", message_id="om_2")) is None
 
 
 @pytest.mark.parametrize("other", [{"user_id": "ou_other"}, {"chat_id": "oc_other"}])

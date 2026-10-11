@@ -364,7 +364,7 @@ async def test_create_response_confirms_without_readback_and_preserves_correctio
     assert await s.reply(message("咖啡10元咖啡11元")) is None
     monkeypatch.delenv("FAKE_CLI_MODE")
     assert "已修改" in await s.reply(message("第二笔改30元", message_id="om_2"))
-    assert len(calls(fake_cli, "+record-get")) == 2
+    assert len(calls(fake_cli, "+record-get")) == 1
     assert len(calls(fake_cli, "+record-batch-create")) == 1
     assert [r["金额"] for r in written(fake_cli)] == [10, 30]
 

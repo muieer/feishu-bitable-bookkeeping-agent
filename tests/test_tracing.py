@@ -103,7 +103,9 @@ async def test_logging_failure_after_submission_retains_real_result(
     assert len(written(fake_cli)) == 1 and await s.reply(message()) is None
 
 
-async def test_post_submission_log_failure_continues_readback(settings, fake_cli, monkeypatch):
+async def test_post_submission_log_failure_continues_response_confirmation(
+    settings, fake_cli, monkeypatch
+):
     s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "25"}))
     await s.reply(message())
     original = MessageTrace.emit

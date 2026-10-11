@@ -373,23 +373,9 @@ class BitableTool:
         return ids
 
     async def update_record(self, record_id: str, fields: dict) -> None:
-        await self._write("+record-batch-update", {"update_records": {record_id: fields}})
-        try:
-            emit("table.update_verification_start", record_id=record_id)
-            actual = await self.get_record(record_id)
-            emit("table.update_verification", record_id=record_id, expected=fields, actual=actual)
-            for name, expected in fields.items():
-                value = actual.get(name)
-                if name == self.settings.bitable_date_field:
-                    matches = datetime.fromisoformat(value) == datetime.fromisoformat(expected)
-                elif name == self.settings.bitable_amount_field:
-                    matches = Decimal(str(value)) == expected
-                else:
-                    matches = value == expected or (expected is None and value == [])
-                if not matches:
-                    raise ValueError("update not visible")
-        except (QueryError, ValueError, TypeError) as exc:
-            raise WriteUncertain("纠错已提交，但尚未核对到完整修改结果；请检查表格。") from exc
+        data = await self._write("+record-batch-update", {"update_records": {record_id: fields}})
+        if data.get("record_id_list") != [record_id]:
+            raise WriteUncertain("修改响应未完整确认目标账单，结果待核对；请检查表格。")
 
 
 # Preserve the demo's direct read diagnostic; it is not exposed to the Agent.

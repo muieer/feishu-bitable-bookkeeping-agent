@@ -41,12 +41,17 @@ async def test_real_create_events_no_success_until_confirmation(settings, fake_c
     assert all(step.status == "completed" for step in state.steps)
 
 
-async def test_correction_confirmed_after_readback(settings, fake_cli):
+async def test_correction_confirmed_after_write_response(settings, fake_cli):
     s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
     await s.reply(message())
     state, snapshots = await run(s, message("刚才改为28元", message_id="om_2"))
-    verification = next(c for stage, c in snapshots if stage == "table.update_verification_start")
-    assert "✓ 已确认修改结果" not in text(verification) and state.title == "已修改"
+    assert not any(stage.startswith("table.update_verification") for stage, _ in snapshots)
+    assert not any(step.key == "verify" for step in state.steps)
+    before_confirmation = snapshots[
+        : next(i for i, (stage, _) in enumerate(snapshots) if stage == "table.confirmed")
+    ]
+    assert all("已修改：" not in text(card) for _, card in before_confirmation)
+    assert state.title == "已修改" and all(step.status == "completed" for step in state.steps)
     assert "28元" in text(state.snapshot())
 
 

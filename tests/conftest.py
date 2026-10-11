@@ -165,7 +165,21 @@ if "batch" in command:
             if mode != "update_not_applied":
                 row.update(data["update_records"].get(row["record_id"], {}))
         rows_path.write_text(json.dumps(rows))
-        success({} if mode != "ignored_fields" else {"ignored_fields": ["金额"]})
+        ids = list(data["update_records"])
+        if mode == "wrong_id":
+            ids = ["rec_other"]
+        if mode == "empty_ids":
+            ids = []
+        if mode == "duplicate_ids":
+            ids *= 2
+        if mode == "extra_ids":
+            ids.append("rec_other")
+        if mode == "invalid_ids":
+            ids = ids[0]
+        result = {"record_id_list": ids} if mode != "missing_id" else {}
+        if mode == "ignored_fields":
+            result["ignored_fields"] = ["金额"]
+        success(result)
     sys.exit(0)
 
 output = Path(args[args.index("--output") + 1])
