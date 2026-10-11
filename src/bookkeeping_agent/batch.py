@@ -5,9 +5,9 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from .formatting import bill_label
 from .models import Decision
 from .tracing import current_trace, emit, require
 
@@ -143,18 +143,15 @@ def render_batch(batch, touched, notes, *, test_mode=False):
             # A missing model field is not evidence that the original message lacked an amount.
             lines.append(f"{index}. {item.text}。{labels[item.status]}：{item.feedback}")
             continue
-        amount = f"{Decimal(str(facts['amount'])):.2f} 元"
-        category = facts.get("category") or {}
-        path = " / ".join(
-            category[key] for key in ("level1", "level2", "level3") if category.get(key)
+        row = bill_label(
+            facts.get("date") or item.sent_at[:10],
+            facts.get("category") or {},
+            facts.get("description") or item.text,
+            facts["amount"],
         )
-        details = [amount, facts.get("description") or item.text]
-        if path:
-            details.append(path)
-        details.append(str(facts.get("date") or item.sent_at[:10]))
         if item.status != "success":
-            details.append(f"{labels[item.status]}：{item.feedback}")
-        lines.append(f"{index}. " + " · ".join(details))
+            row += f"。{labels[item.status]}：{item.feedback}"
+        lines.append(f"{index}. {row}")
     # Keep exactly one plain-text element per result, even when user data contains newlines.
     return "\n".join(" ".join(line.splitlines()) for line in lines), counts
 

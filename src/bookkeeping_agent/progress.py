@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
+from .formatting import bill_label
+
 logger = logging.getLogger(__name__)
 _observer: ContextVar = ContextVar("bookkeeping_progress", default=None)
 
@@ -360,10 +362,11 @@ class ProgressState:
                     f"{category_label(self.preference.category)}。"
                 )
             elif self.expense:
-                result = (
-                    f"{self.title}：{self.expense.amount:.2f} 元 · "
-                    f"{self.expense.description} · {category_label(self.expense.category)} · "
-                    f"{self.expense.date.isoformat()}"
+                result = f"{self.title}：" + bill_label(
+                    self.expense.date,
+                    self.expense.category.model_dump(),
+                    self.expense.description,
+                    self.expense.amount,
                 )
         elif self.outcome == "clarify" and self.status == "待补充":
             result += " 本次尚未记账。"

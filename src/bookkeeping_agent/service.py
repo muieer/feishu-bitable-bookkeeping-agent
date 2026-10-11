@@ -14,6 +14,7 @@ from pydantic_ai.models import Model
 from .agent import DecisionEngine
 from .batch import BatchState, reply_batch, split_expenses
 from .config import Settings
+from .formatting import bill_label
 from .knowledge import Knowledge, KnowledgeError
 from .models import Decision, Expense, IncomingMessage
 from .storage import OperationJournal
@@ -380,9 +381,8 @@ class BookkeepingService:
             if self.settings.test_mode:
                 emit("table.prepared", expense=expense, action=decision.action)
                 require()
-                response = (
-                    f"准备记账：{expense.date.isoformat()} | {expense.amount:.2f} 元 | "
-                    f"{expense.description} | {category_label(expense.category)}。"
+                response = "准备记账：" + bill_label(
+                    expense.date, expense.category.model_dump(), expense.description, expense.amount
                 )
                 try:
                     self.journal.save(
@@ -431,10 +431,8 @@ class BookkeepingService:
                 return str(exc) if isinstance(exc, QueryError) else UNCERTAIN
             emit("table.confirmed", record_id=record_id, expense=expense)
             # If saving fails after remote success, the durable 'started' prevents another create.
-            response = (
-                f"{'已修改' if decision.action == 'update' else '已记账'}："
-                f"{expense.date.isoformat()} | {expense.amount:.2f} 元 | "
-                f"{expense.description} | {category_label(expense.category)}。"
+            response = f"{'已修改' if decision.action == 'update' else '已记账'}：" + bill_label(
+                expense.date, expense.category.model_dump(), expense.description, expense.amount
             )
             try:
                 self.journal.save(
