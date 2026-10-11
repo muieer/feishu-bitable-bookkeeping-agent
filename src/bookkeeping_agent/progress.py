@@ -77,6 +77,12 @@ class ProgressState:
     response: str | None = None
     title: str = "处理结果"
     status: str = "处理未完成"
+    batch_total: int = 0
+    batch_processed: int = 0
+    batch_counts: dict = field(default_factory=dict)
+    batch_stage_counts: dict = field(default_factory=dict)
+    batch_interrupted: bool = False
+    batch_attention: bool = False
 
     def __post_init__(self):
         self.received_at = self.clock()
@@ -112,6 +118,11 @@ class ProgressState:
 
     def on_event(self, stage, data):
         if self.ended_at is not None:
+            return
+        if stage == "batch.started":
+            self.batch_total = data["total"]
+        if self.batch_total:
+            self.on_batch_event(stage, data)
             return
         if stage == "decision.context":
             self.begin(
@@ -201,12 +212,98 @@ class ProgressState:
         elif stage == "preference.save_failed":
             self.fail("preference")
 
+    def on_batch_event(self, stage, data):
+        stages = {
+            "decision.context": ("understand", "理解消费信息与分类"),
+            "history.query": ("history", "查询历史分类"),
+            "expense.merged": ("validate", "校验金额、日期和分类"),
+            "table.lock_acquired": ("schema", "检查表格字段和分类选项"),
+            "table.correction_check": ("correction", "核对待修改账单"),
+            "table.write_planned": ("write", "写入或修改账单"),
+            "table.update_verification_start": ("verify", "核对修改结果"),
+            "preference.write_planned": ("preference", "保存分类偏好"),
+        }
+        completions = {
+            "decision.branch": "understand",
+            "history.valid_cases": "history",
+            "expense.validated": "validate",
+            "table.schema_validated": "schema",
+            "table.correction_preflight": "correction",
+            "table.confirmed": "write",
+            "preference.saved": "preference",
+        }
+        failures = {
+            "decision.error": "understand",
+            "history.error": "history",
+            "expense.validation_failed": "validate",
+            "table.preflight_failed": "schema",
+            "table.write_failed": "write",
+            "preference.save_failed": "preference",
+        }
+        if stage in stages:
+            key, label = stages[stage]
+            step = next((step for step in self.steps if step.key == key), None)
+            if step is None:
+                step = Step(key, label, label)
+                self.steps.append(step)
+            step.status = "running"
+            self.current = f"正在{label}；已处理 {self.batch_processed}/{self.batch_total} 笔。"
+        if stage in completions:
+            key = completions[stage]
+            self.batch_stage_counts[key] = self.batch_stage_counts.get(key, 0) + 1
+            step = next((step for step in self.steps if step.key == key), None)
+            if step:
+                step.completed = f"{step.active}：已完成 {self.batch_stage_counts[key]} 笔"
+                self.complete(key)
+        if stage in failures:
+            self.fail(failures[stage])
+        if stage == "table.confirmed":
+            self.confirmed = True
+            verification = next(
+                (step for step in self.steps if step.key == "verify" and step.status == "running"),
+                None,
+            )
+            if verification:
+                self.batch_stage_counts["verify"] = self.batch_stage_counts.get("verify", 0) + 1
+                verification.completed = (
+                    f"核对修改结果：已完成 {self.batch_stage_counts['verify']} 笔"
+                )
+            self.complete("verify")
+        elif stage == "table.prepared":
+            self.prepared = True
+        elif stage in {"batch.item_started", "batch.item_completed"}:
+            self.batch_processed = data["processed"]
+            self.current = f"已处理 {self.batch_processed}/{self.batch_total} 笔账单。"
+        elif stage in {"batch.completed", "batch.interrupted"}:
+            self.batch_interrupted = stage == "batch.interrupted"
+            self.batch_attention = data.get("attention", False)
+            self.batch_counts = data["counts"]
+            self.completed_response = data["response"]
+            self.outcome = "batch"
+
     def finish(self, response, *, submitted=False, log_failed=False, interrupted=False):
         if self.ended_at is None:
             self.ended_at = self.clock()
         self.response = response
         exact_success = self.outcome == "success" and response == self.completed_response
-        if interrupted:
+        if self.outcome == "batch" and (interrupted or self.batch_interrupted):
+            self.title = "批量处理已中断"
+            self.status = "结果待核对" if self.batch_counts.get("uncertain") else "已中断"
+        elif self.outcome == "batch" and not log_failed:
+            self.title = "批量处理结果"
+            self.status = (
+                "结果待核对"
+                if self.batch_counts.get("uncertain")
+                else "部分完成 · 待补充"
+                if (self.batch_counts.get("pending") or self.batch_attention)
+                and self.batch_counts.get("success")
+                else "待补充"
+                if self.batch_counts.get("pending") or self.batch_attention
+                else "处理未完成"
+                if self.batch_counts.get("failed")
+                else "已完成"
+            )
+        elif interrupted:
             self.status = (
                 "已完成 · 有提示" if self.confirmed else "结果待核对" if submitted else "已中断"
             )
@@ -254,6 +351,8 @@ class ProgressState:
 
     def result_text(self):
         result = self.response or "本次消息已处理。"
+        if self.batch_total:
+            return result
         if self.outcome == "success" and self.response == self.completed_response:
             if self.preference:
                 result = (
@@ -307,7 +406,10 @@ class ProgressState:
                 }
             )
         if self.ended_at is not None:
-            elements.append(body_element(self.result_text()))
+            if self.batch_total:
+                elements.extend(body_element(line) for line in self.result_text().splitlines())
+            else:
+                elements.append(body_element(self.result_text()))
         return {
             "schema": "2.0",
             "config": {

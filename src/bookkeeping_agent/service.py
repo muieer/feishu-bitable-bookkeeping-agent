@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from pydantic_ai.models import Model
 
 from .agent import DecisionEngine
+from .batch import BatchState, reply_batch, split_expenses
 from .config import Settings
 from .knowledge import Knowledge, KnowledgeError
 from .models import Decision, Expense, IncomingMessage
@@ -39,6 +40,7 @@ class Session:
     turns: list[dict] = field(default_factory=list)
     touched: float = field(default_factory=time.monotonic)
     uncertain: bool = False
+    batch: BatchState | None = None
 
 
 class BookkeepingService:
@@ -70,7 +72,10 @@ class BookkeepingService:
                 response = await self._reply(message)
             except TraceLogError:
                 previous = self.journal.get(message.message_id)
-                if previous and previous["status"] == "success":
+                batch_session = self.sessions.get((message.user_id, message.chat_id))
+                if (batch_session and batch_session.batch and trace.response) or (
+                    previous and previous["status"] == "success"
+                ):
                     response = trace.response
                 elif (
                     previous_before_processing
@@ -174,6 +179,9 @@ class BookkeepingService:
                 else None,
                 "recent_turns": session.turns,
             }
+            fragments = split_expenses(message.text)
+            if len(fragments) > 1 or session.batch is not None:
+                return await reply_batch(self, session, message, context, fragments)
             emit("decision.context", context=context)
             require()
             try:
@@ -203,7 +211,7 @@ class BookkeepingService:
                 context["default_date"] = context["pending_default_date"]
             if decision.multiple_expenses:
                 return self._ask(
-                    session, message, decision, "当前一次只处理一笔消费，请将多笔消费分别发送。"
+                    session, message, decision, "这几笔消费请用中文句号「。」分隔，或分别发送。"
                 )
             if decision.action == "clarify" or decision.unresolved or decision.question:
                 return self._ask(

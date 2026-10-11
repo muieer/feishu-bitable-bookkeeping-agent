@@ -1,6 +1,6 @@
 # 系统提示词接入说明
 
-将正式提示词放在同目录的 `system.md`，或通过 `AGENT_SYSTEM_PROMPT_PATH` 指定其他 UTF-8 文件。当前 `system.md` 留空；应用不会自动填入或使用替代业务提示词。每次启动 Agent 时读取文件，修改后重启。
+将正式提示词放在同目录的 `system.md`，或通过 `AGENT_SYSTEM_PROMPT_PATH` 指定其他 UTF-8 文件。仓库已提供默认 `system.md`；文件缺失或为空时，应用停止启动 Agent。每次启动 Agent 时读取文件，修改后重启。
 
 ## 运行时提供的信息
 
@@ -12,7 +12,9 @@
 | `default_date`、`relative_date_base` | 新消费的默认日期和相对日期基准 |
 | `pending` | 待回答的追问、原始消费消息及已提取字段 |
 | `pending_default_date`、`pending_relative_date_base` | 回答追问时沿用的原始日期基准 |
-| `last_record` | 当前用户、当前会话唯一允许的纠错目标及最近成功字段 |
+| `last_record` | 单笔模式的最近成功账单；已选定批量账单时为该账单的纠错目标及成功字段 |
+| `displayed_items` | 最新一次最终回复的编号、账单原文、事实、状态和问题；不包含历史编号 |
+| `selected_number` | 程序识别出的最新列表编号；选定目标后仍须判断是否存在明确操作意图 |
 | `recent_turns` | 必要的最近对话；仅保留在内存中 |
 
 提示词应描述实际消费、计划、价格讨论的区分规则；个人分类优先级和歧义处理；单次纠错与明确长期偏好的区别；多笔独立消费与单笔商品明细的区别。这里的表格和接口说明是接入合同，不是代写的正式提示词。
@@ -24,12 +26,18 @@ Pydantic AI 自动向模型提供 `Decision` 的 JSON Schema，模型通过结�
 - `action`：`ignore`、`create`、`update`、`preference`、`clarify`。
 - `expense`：消费日期 `date`（`YYYY-MM-DD`）、正数金额 `amount`、简洁描述 `description`、分类 `category`。追问时允许只填已明确字段，未指定日期时可省略。
 - `category`：`level1`、`level2`、`level3`。必须符合分类树，有三级子节点时不能省略三级分类。
-- `record_id`：仅用于 `update`，只能指向 `last_record`；省略时程序使用最近成功账单。
+- `record_id`：仅用于 `update`，只能指向 `last_record`；单笔模式省略时使用最近成功账单，批量模式由最新列表选定目标，模型应留空。
 - `preference`：消费对象 `subject`、适用条件 `condition`、完整合法 `category` 和用户明确表达长期偏好的原文 `evidence`。不能由单次纠错推断长期偏好。
 - `question`、`unresolved`：缺失或歧义信息；有未解决问题时程序不写入。
 - `needs_history`：实际消费分类需要历史案例时为 `true`。第一轮没有历史工具；确认记账意图后才允许下一轮检索。
-- `multiple_expenses`：多笔独立消费时为 `true`，程序要求分别发送。
+- `multiple_expenses`：当前片段仍含多笔独立消费时为 `true`，程序要求用中文句号分隔。中文句号拆分由程序完成，每个片段独立调用同一决策流程。
+- `target_number`：批量补充或纠错时指定 `displayed_items` 中的正整数编号；新消费留空。只允许最新列表，不回退历史编号或最近账单。
+- `clarification_scope`：`expense` 表示账单信息待补充，必须保留已知字段；程序即使收到空 `expense` 也保存原文待办。`target` 表示目标或操作意图不明确，不新建消费待办。默认 `expense`，兼容既有单笔决策。
 - `continues_pending`：正在回答已有追问时为 `true`，保留原消费字段及日期基准；新的消费为 `false`。
+
+批量 `create`、`update`、`clarify` 输出必须显式提供 `continues_pending` 和 `target_number`，追问还必须显式提供 `clarification_scope`。模型省略这些字段时，输出校验要求重新生成；重试仍不完整则本片段不写入。字段默认值仅用于兼容原有单笔调用和直接构造的决策。
+
+首轮存在待补充账单、当前片段不含数值而模型输出带金额的新消费时，必须明确关联原待办，否则要求重新判断或追问。这项检查用于拦截把「堂食」等短回答误作新消费的输出，不替模型选择操作目标。
 
 `ignore` 不携带操作、问题或历史检索请求，不产生业务工具调用；程序统一简短回复「这条消息未涉及实际消费，本次未记账。」。新增、纠错及偏好必须分别表达，混合操作需要追问澄清，不能在单个决策里隐含执行多项操作。
 

@@ -119,7 +119,9 @@ def register_handlers(channel: FeishuChannel, service: BookkeepingService) -> No
                     await asyncio.gather(initial, return_exceptions=True)
                 if feedback.state.ended_at is None:
                     response = (
-                        "表格写入已成功，但处理已中断；请勿重复发送这笔消费。"
+                        feedback.state.completed_response
+                        if feedback.state.batch_total and feedback.state.completed_response
+                        else "表格写入已成功，但处理已中断；请勿重复发送这笔消费。"
                         if feedback.state.confirmed
                         else "处理已中断，写入结果待核对；请先检查表格，勿重复发送。"
                         if trace.mutation_submitted
@@ -155,7 +157,9 @@ def register_handlers(channel: FeishuChannel, service: BookkeepingService) -> No
                 "message_failed message_id=%s kind=%s", message.message_id, type(exc).__name__
             )
             response = (
-                "表格写入已成功，但后续处理未完成；请勿重复发送这笔消费。"
+                feedback.state.completed_response
+                if feedback.state.batch_total and feedback.state.completed_response
+                else "表格写入已成功，但后续处理未完成；请勿重复发送这笔消费。"
                 if feedback.state.confirmed
                 else "处理未完成，写入结果待核对；请先检查表格，勿重复发送。"
                 if trace.mutation_submitted

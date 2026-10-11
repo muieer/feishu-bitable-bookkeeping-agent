@@ -56,14 +56,24 @@ class Decision(StrictModel):
         description="计划、价格讨论、查询统计、闲聊均为 ignore；实际消费才可 create。"
     )
     expense: ExpensePatch | None = None
-    record_id: str | None = Field(default=None, description="仅可修改本会话最近成功账单。")
+    record_id: str | None = Field(default=None, description="仅可修改本会话最近或选定的成功账单。")
     preference: Preference | None = None
     question: Annotated[str, Field(min_length=1, max_length=500)] | None = None
     unresolved: list[str] = Field(default_factory=list)
     needs_history: bool = Field(default=False, description="已确认记账意图后，是否需要历史案例。")
-    multiple_expenses: bool = Field(default=False, description="多笔独立消费禁止合并或只记一笔。")
+    multiple_expenses: bool = Field(
+        default=False, description="当前片段仍含多笔独立消费时为 true，禁止合并或只记一笔。"
+    )
     continues_pending: bool = Field(
         default=False, description="本条消息是否在回答已有追问。新消费为 false。"
+    )
+    target_number: Annotated[int, Field(gt=0, strict=True)] | None = Field(
+        default=None,
+        description="仅指向 displayed_items 中最新列表的正整数编号；新消费必须返回 JSON null，不能用 0；禁止引用历史编号。",
+    )
+    clarification_scope: Literal["expense", "target"] = Field(
+        default="expense",
+        description="追问范围：expense 表示账单信息待补充，须保留已知字段；target 表示目标或操作意图不明确，不创建待办。",
     )
 
     @model_validator(mode="after")
