@@ -351,7 +351,7 @@ class BitableTool:
                 raise WriteUncertain("写入字段未被完整接受，结果待核对；请检查表格。")
             return data
 
-    async def create_records(self, expenses: list[Expense]) -> list[str | None]:
+    async def create_records(self, expenses: list[Expense]) -> list[str]:
         if not 1 <= len(expenses) <= 200:
             raise QueryError("一次消息最多新增 200 笔账单，请减少账单数量。")
         data = await self._write(
@@ -368,38 +368,9 @@ class BitableTool:
             or len(set(ids)) != len(ids)
         ):
             raise WriteUncertain("批量账单 ID 无法逐笔对应，写入结果待核对；请先检查表格。")
-        # Verify the returned ordering against fields, not just array length. A malformed,
-        # reordered or partially visible response must not assign an unrelated ID to a bill.
-        emit("table.create_verification_start", record_ids=ids)
-        try:
-            rows = await self._rows(
-                "+record-get",
-                [part for value in ids for part in ("--record-id", value)],
-                categories=True,
-            )
-            indexed = {}
-            for row in rows:
-                record_id = row.get("record_id")
-                if record_id not in ids or record_id in indexed:
-                    raise ValueError("unreliable returned records")
-                indexed[record_id] = row
-            confirmed = []
-            for record_id, expense in zip(ids, expenses, strict=True):
-                actual = indexed.get(record_id, {})
-                expected = self.expense_fields(expense)
-                confirmed.append(
-                    record_id
-                    if all(
-                        same_field(name, actual.get(name), value, self.settings)
-                        for name, value in expected.items()
-                    )
-                    else None
-                )
-            emit("table.create_verification", record_ids=ids, confirmed=confirmed, actual=rows)
-            return confirmed
-        except (QueryError, ValueError, TypeError, KeyError) as exc:
-            emit("table.create_verification_failed", status="error", error=exc)
-            return [None] * len(expenses)
+        # The successful create response supplies IDs in submission order.
+        # Read-back visibility may lag behind the accepted write.
+        return ids
 
     async def update_record(self, record_id: str, fields: dict) -> None:
         await self._write("+record-batch-update", {"update_records": {record_id: fields}})

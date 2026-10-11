@@ -32,10 +32,12 @@ async def test_real_create_events_no_success_until_confirmation(settings, fake_c
     elements = state.snapshot()["body"]["elements"]
     assert elements[-1]["text"]["tag"] == "plain_text"
     assert next(e for e in elements if e["tag"] == "collapsible_panel")["expanded"] is False
-    verification = next(
-        card for stage, card in snapshots if stage == "table.create_verification_start"
-    )
-    assert "已记账：" not in text(verification)
+    before_confirmation = snapshots[
+        : next(i for i, (stage, _) in enumerate(snapshots) if stage == "table.confirmed")
+    ]
+    assert all("已记账：" not in text(card) for _, card in before_confirmation)
+    assert not any(stage.startswith("table.create_verification") for stage, _ in snapshots)
+    assert not any(step.key == "verify" for step in state.steps)
     assert all(step.status == "completed" for step in state.steps)
 
 
@@ -48,10 +50,8 @@ async def test_correction_confirmed_after_readback(settings, fake_cli):
     assert "28元" in text(state.snapshot())
 
 
-@pytest.mark.parametrize("mode", ["missing_id", "write_failure", "partial_visible"])
+@pytest.mark.parametrize("mode", ["missing_id", "write_failure", "ignored_fields"])
 async def test_uncertain_feedback_never_claims_completed(settings, fake_cli, monkeypatch, mode):
-    if mode == "partial_visible":
-        mode = "duplicate_rows"
     s = service(settings, fake_cli, create())
     monkeypatch.setenv("FAKE_CLI_MODE", mode)
     state, _ = await run(s)

@@ -221,9 +221,6 @@ class ProgressState:
         elif stage == "table.update_verification_start":
             self.complete("write")
             self.begin("verify", "修改已提交，正在核对表格中的实际结果。", "已确认修改结果")
-        elif stage == "table.create_verification_start":
-            self.complete("write")
-            self.begin("verify", "新增已提交，正在核对逐笔结果。", "已确认新增结果")
         elif stage == "table.prepared":
             self.prepared = True
             self.expense = data["expense"]
@@ -265,7 +262,6 @@ class ProgressState:
             "table.correction_check": ("correction", "核对待修改账单"),
             "table.write_planned": ("write", "写入或修改账单"),
             "table.update_verification_start": ("verify", "核对修改结果"),
-            "table.create_verification_start": ("verify", "核对新增结果"),
             "preference.write_planned": ("preference", "保存分类偏好"),
         }
         completions = {

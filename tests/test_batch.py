@@ -327,9 +327,7 @@ async def test_reference_alone_never_authorizes_update(settings, fake_cli, actio
     assert bill(s).status == "success"
 
 
-@pytest.mark.parametrize(
-    "mode", ["missing_id", "duplicate_ids", "partial_ids", "reordered_ids", "duplicate_rows"]
-)
+@pytest.mark.parametrize("mode", ["missing_id", "duplicate_ids", "partial_ids", "ignored_fields"])
 async def test_unreliable_batch_response_never_assigns_wrong_ids(
     settings, fake_cli, monkeypatch, mode
 ):
@@ -346,8 +344,9 @@ async def test_unreliable_batch_response_never_assigns_wrong_ids(
     assert await s.reply(message("咖啡10元咖啡11元")) is None
 
 
-async def test_partially_visible_results_confirm_only_matching_bills(
-    settings, fake_cli, monkeypatch
+@pytest.mark.parametrize("mode", ["partial_visible", "duplicate_rows", "missing_file"])
+async def test_create_response_confirms_without_readback_and_preserves_correction(
+    settings, fake_cli, monkeypatch, mode
 ):
     s = service(
         settings,
@@ -355,12 +354,19 @@ async def test_partially_visible_results_confirm_only_matching_bills(
         [create(source_text="咖啡10元", amount="10"), create(source_text="咖啡11元", amount="11")],
         Decision(action="update", target_number=2, expense={"amount": "30"}),
     )
-    monkeypatch.setenv("FAKE_CLI_MODE", "partial_visible")
+    monkeypatch.setenv("FAKE_CLI_MODE", mode)
     response = await s.reply(message("咖啡10元咖啡11元"))
-    assert "成功1笔，待核对1笔" in response
+    assert "成功2笔" in response and "待核对" not in response
+    assert not calls(fake_cli, "+record-get")
+    bills = list(s.sessions[("ou_1", "oc_1")].bills.values())
+    assert [b.record_id for b in bills] == [r["record_id"] for r in written(fake_cli)]
+    assert all(b.status == "success" for b in bills)
+    assert await s.reply(message("咖啡10元咖啡11元")) is None
     monkeypatch.delenv("FAKE_CLI_MODE")
-    assert "待核对" in await s.reply(message("第二笔改30元", message_id="om_2"))
-    assert len(calls(fake_cli, "+record-batch-create")) == 1 and written(fake_cli)[1]["金额"] == 11
+    assert "已修改" in await s.reply(message("第二笔改30元", message_id="om_2"))
+    assert len(calls(fake_cli, "+record-get")) == 2
+    assert len(calls(fake_cli, "+record-batch-create")) == 1
+    assert [r["金额"] for r in written(fake_cli)] == [10, 30]
 
 
 async def test_independent_failed_update_does_not_block_new_or_preference(

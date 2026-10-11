@@ -152,13 +152,14 @@ if "batch" in command:
             ids.append(record_id)
             rows.append({"record_id": record_id, **fields})
         rows_path.write_text(json.dumps(rows))
-        if mode == "reordered_ids":
-            ids.reverse()
         if mode == "duplicate_ids":
             ids = [ids[0]] * len(ids)
         if mode == "partial_ids":
             ids = ids[:1]
-        success({"record_id_list": ids} if mode != "missing_id" else {})
+        result = {"record_id_list": ids} if mode != "missing_id" else {}
+        if mode == "ignored_fields":
+            result["ignored_fields"] = ["金额"]
+        success(result)
     else:
         for row in rows:
             if mode != "update_not_applied":

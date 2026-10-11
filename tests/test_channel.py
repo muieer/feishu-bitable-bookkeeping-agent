@@ -57,7 +57,7 @@ async def test_sdk_event_agent_subprocess_reply_and_dedup(
     assert "已收到" in json.dumps(payload, ensure_ascii=False)
     final = json.dumps(mock_card_updates.call_args.args[1], ensure_ascii=False)
     assert "已记账" in final and "18.1元" in final
-    assert recorded()["args"][:2] == ["base", "+record-get"]
+    assert recorded()["args"][:2] == ["base", "+record-batch-create"]
 
 
 async def test_nonexpense_replies_without_calling_cli(
