@@ -196,9 +196,15 @@ class MessageTrace:
                 record = redact(record, self.store.secrets)
                 entry = f"\n=== {record['timestamp']} {stage} [{status}] ===\n"
                 entry += json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+                # Log cleanup can remove the directory or this delivery's file after startup.
+                # Restore only missing paths; permission and I/O failures still stop writes.
+                self.store.directory.mkdir(parents=True, exist_ok=True)
                 if self.file_created:
-                    fd = os.open(self.path, os.O_WRONLY | os.O_APPEND)
-                else:
+                    try:
+                        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND)
+                    except FileNotFoundError:
+                        self.file_created = False
+                if not self.file_created:
                     while True:
                         try:
                             fd = os.open(

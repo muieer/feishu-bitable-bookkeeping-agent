@@ -6,7 +6,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
-/tests/
+/tests/fixtures/batch_clarification_replay.json
 .ruff_cache/
 build/
 dist/

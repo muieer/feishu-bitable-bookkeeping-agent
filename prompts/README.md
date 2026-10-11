@@ -1,44 +1,46 @@
-# 系统提示词接入说明
+# 系统提示词接入合同
 
-将正式提示词放在同目录的 `system.md`，或通过 `AGENT_SYSTEM_PROMPT_PATH` 指定其他 UTF-8 文件。仓库已提供默认 `system.md`；文件缺失或为空时，应用停止启动 Agent。每次启动 Agent 时读取文件，修改后重启。
+默认提示词为 `system.md`；`AGENT_SYSTEM_PROMPT_PATH` 可指定其他 UTF-8 文件。启动时读取，文件缺失或为空则停止启动 Agent。修改后须重启。代码不内置替代业务提示词。
 
-## 运行时提供的信息
+## 完整消息与结构化输出
 
-程序每轮提供完整分类树、个人分类规则、已保存的明确长期偏好，以及以下上下文：
+单笔和多笔统一使用 `MessagePlan.decisions`，一条完整消息先进行一次推理，最多返回 200 个决策。程序不按标点拆消息；同一业务对象本轮只返回一个最终决策。结构化解析失败时整条消息不执行写入。
 
-| 信息 | 用途 |
+| 字段 | 合同 |
 | --- | --- |
-| `message_sent_at`、`timezone` | 当前消息的发送时间和配置时区 |
-| `default_date`、`relative_date_base` | 新消费的默认日期和相对日期基准 |
-| `pending` | 待回答的追问、原始消费消息及已提取字段 |
-| `pending_default_date`、`pending_relative_date_base` | 回答追问时沿用的原始日期基准 |
-| `last_record` | 单笔模式的最近成功账单；已选定批量账单时为该账单的纠错目标及成功字段 |
-| `displayed_items` | 最新一次最终回复的编号、账单原文、事实、状态和问题；不包含历史编号 |
-| `selected_number` | 程序识别出的最新列表编号；选定目标后仍须判断是否存在明确操作意图 |
-| `recent_turns` | 必要的最近对话；仅保留在内存中 |
+| `decision_id` | 本消息内唯一标识；历史阶段保留原 ID |
+| `source_text`、`source_occurrence` | 表达该意图的当前消息连续原文及出现序号；来源必须真实存在，独立新账单来源不能重叠或重复 |
+| `action` | `ignore`、`create`、`update`、`clarify`、`preference`；同一消息可混合不同操作 |
+| `expense` | 必填，可为 null；create/update 必须为对象，其中 date、amount、description、category 都必填，未知或未修改值为 null；追问保留已知事实 |
+| `continues_pending` | 必填；补充已有待办为 true，新消费为 false |
+| `target_id`、`target_number` | 必填，可为 null；分别关联允许操作的稳定账单 ID 或最新回复编号，不能引用其他用户或会话的记录 |
+| `target_reference` | 自然语言关联稳定 ID 时的原文引用，须唯一匹配已有账单描述或原文 |
+| `question`、`unresolved` | question 必填，可为 null；clarify 必须提供问题。有问题或未解决字段时不执行该笔写入 |
+| `clarification_scope` | `expense` 保存账单事实；`target` 仅追问目标或意图，不创建待办 |
+| `needs_history`、`history_keywords` | 已确认消费且分类需要历史时使用；关键词最多两个，程序去重查询 |
+| `preference` | 必填，可为 null；preference 决策必须提供对象、适用条件、完整分类及长期意图证据，其他操作为 null |
+| `cancel_pending` | 明确取消未提交待办时用 ignore 并指定目标；不能删除成功账单或重试待核对结果 |
 
-提示词应描述实际消费、计划、价格讨论的区分规则；个人分类优先级和歧义处理；单次纠错与明确长期偏好的区别；多笔独立消费与单笔商品明细的区别。这里的表格和接口说明是接入合同，不是代写的正式提示词。
+金额的最终业务验证按账单独立执行：有限正数，最多两位小数及 14 位有效数字。分类路径需符合个人分类树和远端单选选项，模型不能创造分类。
 
-## 结构化输出合同
+## 每轮运行上下文
 
-Pydantic AI 自动向模型提供 `Decision` 的 JSON Schema，模型通过结构化输出返回决策，无需发送自由文本结果或宣称写入成功。
+程序提供完整个人分类树、规则和最新明确偏好，以及以下数据：
 
-- `action`：`ignore`、`create`、`update`、`preference`、`clarify`。
-- `expense`：消费日期 `date`（`YYYY-MM-DD`）、正数金额 `amount`、简洁描述 `description`、分类 `category`。追问时允许只填已明确字段，未指定日期时可省略。
-- `category`：`level1`、`level2`、`level3`。必须符合分类树，有三级子节点时不能省略三级分类。
-- `record_id`：仅用于 `update`，只能指向 `last_record`；单笔模式省略时使用最近成功账单，批量模式由最新列表选定目标，模型应留空。
-- `preference`：消费对象 `subject`、适用条件 `condition`、完整合法 `category` 和用户明确表达长期偏好的原文 `evidence`。不能由单次纠错推断长期偏好。
-- `question`、`unresolved`：缺失或歧义信息；有未解决问题时程序不写入。
-- `needs_history`：实际消费分类需要历史案例时为 `true`。第一轮没有历史工具；确认记账意图后才允许下一轮检索。
-- `multiple_expenses`：当前片段仍含多笔独立消费时为 `true`，程序要求用中文句号分隔。中文句号拆分由程序完成，每个片段独立调用同一决策流程。
-- `target_number`：批量补充或纠错时指定 `displayed_items` 中的正整数编号；新消费留空。只允许最新列表，不回退历史编号或最近账单。
-- `clarification_scope`：`expense` 表示账单信息待补充，必须保留已知字段；程序即使收到空 `expense` 也保存原文待办。`target` 表示目标或操作意图不明确，不新建消费待办。默认 `expense`，兼容既有单笔决策。
-- `continues_pending`：正在回答已有追问时为 `true`，保留原消费字段及日期基准；新的消费为 `false`。
+| 上下文 | 用途 |
+| --- | --- |
+| `message_sent_at`、`timezone` | 本条消息在配置时区的时间 |
+| `default_date`、`relative_date_base` | 新消费默认日期及当前消息相对日期基准 |
+| `displayed_items` | 最新最终回复的固定编号映射 |
+| `pending_items` | 所有待补充、待处理的账单，各自保留原文、日期基准、已知事实和问题 |
+| `allowed_items` | 当前用户、当前会话内允许关联的账单 |
+| `last_record` | 最近成功账单，无编号即时纠错目标 |
+| `recent_turns` | 最近必要对话，仅在内存中保存 |
 
-批量 `create`、`update`、`clarify` 输出必须显式提供 `continues_pending` 和 `target_number`，追问还必须显式提供 `clarification_scope`。模型省略这些字段时，输出校验要求重新生成；重试仍不完整则本片段不写入。字段默认值仅用于兼容原有单笔调用和直接构造的决策。
+账单上下文包含 `bill_id`、`text`、`sent_at`、`expense`、`status`、`question`、`pending_action`、`pending_patch`、`record_id` 和远端已确认的 `confirmed`。未完成修改的草稿与已确认字段分开保存。
 
-首轮存在待补充账单、当前片段不含数值而模型输出带金额的新消费时，必须明确关联原待办，否则要求重新判断或追问。这项检查用于拦截把「堂食」等短回答误作新消费的输出，不替模型选择操作目标。
+## 历史补全阶段
 
-`ignore` 不携带操作、问题或历史检索请求，不产生业务工具调用；程序统一简短回复「这条消息未涉及实际消费，本次未记账。」。新增、纠错及偏好必须分别表达，混合操作需要追问澄清，不能在单个决策里隐含执行多项操作。
+首轮无模型可调用的业务工具。程序仅对 `needs_history` 决策的不同关键词执行只读查询，过滤非法分类案例，再统一发起一次补全推理。模型只能返回 `unresolved_decisions` 中的 ID；只允许补全分类或追问，不能改变交易事实、路由、来源或修改意图。程序保留首轮已确定决策。历史阶段失败或违反合同时，需要历史的项目独立追问，其他确定项目继续执行。
 
-历史案例只作为辅助分类证据，明确规则优先。程序回复新增或纠错结果时直接使用成功写入且通过校验的数据，模型没有记录写入工具、任意命令权限或分类选项管理权限。
+普通消息仅需一次模型请求；输出校验允许一次重试，历史补全也允许一次重试。SDK 的 HTTP 自动重试另计，受发送前 HTTP 请求额度约束。

@@ -121,6 +121,45 @@ class ProgressState:
     def on_event(self, stage, data):
         if self.ended_at is not None:
             return
+        if stage == "decision.branch":
+            self.action = data["decision"].action
+        elif stage in {"expense.validated", "table.confirmed", "table.prepared"}:
+            self.expense = data["expense"]
+        elif stage == "preference.saved":
+            self.preference = data["preference"]
+        elif stage == "business.cancelled":
+            self.outcome = "success"
+        elif stage == "batch.interrupted":
+            self.batch_total = max(1, sum(data["counts"].values()))
+            self.batch_counts = data["counts"]
+            self.completed_response = data["response"]
+            self.batch_interrupted = True
+            self.outcome = "batch"
+            return
+        if stage == "message.plan":
+            self.complete("understand")
+            self.complete("history_match")
+            return
+        if stage == "message.completed":
+            self.completed_response = data["response"]
+            if data["listed"]:
+                self.batch_total = max(1, sum(data["counts"].values()))
+                self.batch_counts = data["counts"]
+                self.batch_attention = data["attention"]
+                self.outcome = "batch"
+            else:
+                self.batch_total = 0
+                counts = data["counts"]
+                self.outcome = (
+                    "clarify"
+                    if counts["pending"]
+                    else "failure"
+                    if counts["failed"] or counts["uncertain"]
+                    else "success"
+                    if counts["success"] or self.preference or self.outcome == "success"
+                    else "clarify"
+                )
+            return
         if stage == "batch.started":
             self.batch_total = data["total"]
         if self.batch_total:
@@ -182,6 +221,9 @@ class ProgressState:
         elif stage == "table.update_verification_start":
             self.complete("write")
             self.begin("verify", "修改已提交，正在核对表格中的实际结果。", "已确认修改结果")
+        elif stage == "table.create_verification_start":
+            self.complete("write")
+            self.begin("verify", "新增已提交，正在核对逐笔结果。", "已确认新增结果")
         elif stage == "table.prepared":
             self.prepared = True
             self.expense = data["expense"]
@@ -223,6 +265,7 @@ class ProgressState:
             "table.correction_check": ("correction", "核对待修改账单"),
             "table.write_planned": ("write", "写入或修改账单"),
             "table.update_verification_start": ("verify", "核对修改结果"),
+            "table.create_verification_start": ("verify", "核对新增结果"),
             "preference.write_planned": ("preference", "保存分类偏好"),
         }
         completions = {
@@ -249,7 +292,7 @@ class ProgressState:
                 step = Step(key, label, label)
                 self.steps.append(step)
             step.status = "running"
-            self.current = f"正在{label}；已处理 {self.batch_processed}/{self.batch_total} 笔。"
+            self.current = f"正在{label}；已确认 {self.batch_processed} 笔账单。"
         if stage in completions:
             key = completions[stage]
             self.batch_stage_counts[key] = self.batch_stage_counts.get(key, 0) + 1
@@ -260,6 +303,7 @@ class ProgressState:
         if stage in failures:
             self.fail(failures[stage])
         if stage == "table.confirmed":
+            self.batch_processed += 1
             self.confirmed = True
             verification = next(
                 (step for step in self.steps if step.key == "verify" and step.status == "running"),
@@ -273,15 +317,7 @@ class ProgressState:
             self.complete("verify")
         elif stage == "table.prepared":
             self.prepared = True
-        elif stage in {"batch.item_started", "batch.item_completed"}:
-            self.batch_processed = data["processed"]
-            self.current = f"已处理 {self.batch_processed}/{self.batch_total} 笔账单。"
-        elif stage in {"batch.completed", "batch.interrupted"}:
-            self.batch_interrupted = stage == "batch.interrupted"
-            self.batch_attention = data.get("attention", False)
-            self.batch_counts = data["counts"]
-            self.completed_response = data["response"]
-            self.outcome = "batch"
+            self.batch_processed += 1
 
     def finish(self, response, *, submitted=False, log_failed=False, interrupted=False):
         if self.ended_at is None:
@@ -321,6 +357,8 @@ class ProgressState:
             self.title = (
                 "已保存分类偏好"
                 if self.preference
+                else "已取消未完成操作"
+                if self.action == "ignore"
                 else "准备记账"
                 if self.prepared
                 else "已修改"

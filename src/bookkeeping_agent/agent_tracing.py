@@ -16,7 +16,8 @@ from .tracing import emit, require, run_state
 
 
 class TracedHTTPClient(httpx2.AsyncClient):
-    def __init__(self, **kwargs):
+    def __init__(self, *, request_budget=None, **kwargs):
+        self.request_budget = request_budget
         kwargs.setdefault("timeout", httpx2.Timeout(DEFAULT_HTTP_TIMEOUT, connect=5))
         kwargs.setdefault(
             "limits",
@@ -78,6 +79,15 @@ class TracedHTTPClient(httpx2.AsyncClient):
                 duration_ms=(time.monotonic() - started) * 1000,
             )
             raise
+
+    async def _send_single_request(self, request):
+        # Redirects inside send() also cross this boundary; count every HTTP attempt.
+        require()
+        if self.request_budget is not None:
+            attempt = self.request_budget.reserve()
+            emit("llm.budget_reserved", attempt=attempt, limit=self.request_budget.limit)
+            require()
+        return await super()._send_single_request(request)
 
 
 class AgentTraceCapability(Capability):

@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     lark_cli_identity: Literal["user", "bot"] = "user"
     cli_timeout_seconds: float = Field(default=30, gt=0)
     agent_timeout_seconds: float = Field(default=90, gt=0)
+    llm_http_request_limit: int | None = Field(default=None, ge=0)
+    llm_http_budget_path: Path = Path(".runtime/llm-http-budget.json")
     display_timezone: str = "Asia/Shanghai"
 
     @field_validator("bitable_view_id")

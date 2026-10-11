@@ -65,3 +65,15 @@ class OperationJournal:
             raise
         self.entries = updated
         emit("journal.saved", message_id=message_id, operation_status=status, metadata=metadata)
+
+    def reserve_operations(self, operations: dict[str, dict]) -> None:
+        """Reserve every bill in a single durable file replacement before a batch call."""
+        updated = dict(self.entries)
+        for operation_id, metadata in operations.items():
+            if self.get(operation_id):
+                raise ValueError("operation already reserved")
+            updated[self.key(operation_id)] = {"status": "started", **metadata}
+        emit("journal.reserve_start", operations=operations, durable=True)
+        atomic_json(self.path, updated)
+        self.entries = updated
+        emit("journal.reserved", operations=operations)
