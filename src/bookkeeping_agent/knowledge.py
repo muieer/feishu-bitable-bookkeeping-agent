@@ -2,8 +2,7 @@ import json
 from pathlib import Path
 
 from .config import Settings
-from .models import CategoryPath, Preference
-from .storage import atomic_json
+from .models import CategoryPath
 
 
 class KnowledgeError(ValueError):
@@ -46,7 +45,6 @@ class Knowledge:
             raise KnowledgeError("目标表与 schema.json / categories.json 不一致。")
         self.fields = tables[0]["fields"]
         self.validate_schema(self.fields)
-        self.preferences()  # Fail at startup if persisted preferences are corrupt.
 
     def validate_category(self, category: CategoryPath) -> None:
         if (category.level1, category.level2, category.level3) not in self.paths:
@@ -74,33 +72,12 @@ class Knowledge:
             if any(path[level] is not None and path[level] not in allowed for path in self.paths):
                 raise KnowledgeError(f"分类树包含表格中不存在的选项：{name}。")
 
-    def preferences(self) -> list[Preference]:
-        path = self.settings.preferences_path
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"rules": []}
-        rules = [Preference.model_validate(rule) for rule in data["rules"]]
-        for rule in rules:
-            self.validate_category(rule.category)
-        return rules
-
-    def update_preference(self, preference: Preference) -> None:
-        self.validate_category(preference.category)
-        rules = [rule for rule in self.preferences() if rule.subject != preference.subject]
-        rules.append(preference)
-        atomic_json(
-            self.settings.preferences_path,
-            {
-                "version": 1,
-                "rules": [rule.model_dump(mode="json") for rule in rules],
-            },
-        )
-
     def context(self) -> str:
         return json.dumps(
             {
                 "categories": self.categories,
                 "personal_rules": self.rules,
-                "explicit_preferences": [p.model_dump(mode="json") for p in self.preferences()],
-                "precedence": "明确的长期偏好优先于旧规则；明确规则优先于历史案例。",
+                "precedence": "仅以完整个人分类树和规则为依据；依据不足或规则冲突时 clarify。",
             },
             ensure_ascii=False,
         )

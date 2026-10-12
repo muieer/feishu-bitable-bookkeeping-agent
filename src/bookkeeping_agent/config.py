@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     bitable_category1_field: str = "一级分类"
     bitable_category2_field: str = "二级分类"
     bitable_category3_field: str = "三级分类"
-    agent_system_prompt_path: Path = Path("prompts/system.md")
+    recognition_prompt_path: Path = Path("prompts/recognition.md")
+    decision_prompt_path: Path = Path("prompts/decision.md")
     categories_path: Path = Path("knowledge/categories.json")
     rules_path: Path = Path("knowledge/rules.json")
-    preferences_path: Path = Path("knowledge/preferences.json")
     schema_path: Path = Path("knowledge/schema.json")
     operation_journal_path: Path = Path(".runtime/operations.json")
     log_file_path: Path = Path("logs/service.log")
@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     lark_cli_identity: Literal["user", "bot"] = "user"
     cli_timeout_seconds: float = Field(default=30, gt=0)
     agent_timeout_seconds: float = Field(default=90, gt=0)
+    llm_message_request_limit: int = Field(default=10, ge=1, le=10)
+    llm_http_request_limit: int | None = Field(default=None, ge=0)
+    llm_http_budget_path: Path = Path(".runtime/llm-http-budget.json")
     display_timezone: str = "Asia/Shanghai"
 
     @field_validator("bitable_view_id")

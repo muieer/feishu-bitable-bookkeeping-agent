@@ -10,7 +10,7 @@ from .tracing import LOG_FAILED, LOG_FAILED_SUFFIX, current_trace, emit
 logger = logging.getLogger(__name__)
 FEEDBACK_TIMEOUT_SECONDS = 3
 UPDATE_INTERVAL_SECONDS = 1
-HEARTBEAT_SECONDS = 5
+HEARTBEAT_SECONDS = 1
 
 
 class CardFeedback:

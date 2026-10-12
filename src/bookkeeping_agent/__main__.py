@@ -25,8 +25,9 @@ async def run(settings: Settings, args: argparse.Namespace) -> None:
     if args.check or args.check_remote:
         print("本地配置、分类树、个人规则和表格结构校验通过，已找到 lark-cli。")
         try:
-            read_system_prompt(settings.agent_system_prompt_path)
-            print(f"系统提示词已准备：{settings.agent_system_prompt_path.resolve()}")
+            for path in (settings.recognition_prompt_path, settings.decision_prompt_path):
+                read_system_prompt(path)
+                print(f"阶段提示词已准备：{path.resolve()}")
         except KnowledgeError as exc:
             print(f"Agent 尚不能启动：{exc}")
         if args.check_remote:
@@ -113,7 +114,9 @@ def main() -> None:
     group.add_argument("--check-remote", action="store_true", help="同时只读核对远端字段与分类")
     group.add_argument("--query", type=int, help="只读诊断：跳过模型查询 N 条最近消费")
     group.add_argument("--ask", help="在终端处理一条消息，会实际记账")
-    group.add_argument("--interactive", action="store_true", help="终端连续会话，支持追问和纠错")
+    group.add_argument(
+        "--interactive", action="store_true", help="终端连续会话，支持消费编号与纠错"
+    )
     args = parser.parse_args()
     try:
         settings = Settings()

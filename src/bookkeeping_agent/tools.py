@@ -54,7 +54,9 @@ class BitableTool:
         self.settings = settings
         self.write_lock = asyncio.Lock()
 
-    async def _run(self, command: str, args: list[str], directory: str, *, write=False) -> dict:
+    async def _run(
+        self, command: str, args: list[str], directory: str, *, write=False, artifact=False
+    ) -> dict:
         require(reconciliation=not write)
         s = self.settings
         executable = shutil.which(s.lark_cli_path)
@@ -132,7 +134,15 @@ class BitableTool:
             raise QueryError("多维表格查询失败，请检查 CLI 登录态、表格标识和读取权限。")
         try:
             summary = json.loads(stdout)
-            if not isinstance(summary, dict) or summary.get("ok") is not True:
+            manifest = (
+                isinstance(summary, dict)
+                and not write
+                and artifact
+                and "ok" not in summary
+                and summary.get("manifest_version") == "v1"
+                and summary.get("format") == "ndjson"
+            )
+            if not isinstance(summary, dict) or not (summary.get("ok") is True or manifest):
                 raise ValueError("CLI did not confirm success")
             emit("cli.parsed", summary=summary)
             return summary
@@ -154,7 +164,7 @@ class BitableTool:
         with TemporaryDirectory(prefix="bookkeeping-") as directory:
             output = Path(directory) / "records.ndjson"
             try:
-                await self._run(
+                summary = await self._run(
                     command,
                     [
                         *args,
@@ -165,6 +175,7 @@ class BitableTool:
                         output.name,
                     ],
                     directory,
+                    artifact=True,
                 )
             finally:
                 if output.exists():
@@ -175,12 +186,34 @@ class BitableTool:
             try:
                 contents = output.read_text(encoding="utf-8")
                 require(reconciliation=True)
-                return [
+                rows = [
                     json.loads(line, parse_float=Decimal)
                     for line in contents.splitlines()
                     if line.strip()
                 ]
-            except (OSError, ValueError, TypeError) as exc:
+                if summary.get("manifest_version") is not None:
+                    manifest_path = Path(summary["record_file"])
+                    if not manifest_path.is_absolute():
+                        manifest_path = Path(directory) / manifest_path
+                    count, size = summary["records_count"], summary["record_file_size_bytes"]
+                    if (
+                        summary["manifest_version"] != "v1"
+                        or summary["format"] != "ndjson"
+                        or summary["base_token"] != self.settings.bitable_base_token
+                        or summary["table_id"] != self.settings.bitable_table_id
+                        or manifest_path.resolve() != output.resolve()
+                        or type(count) is not int
+                        or count != len(rows)
+                        or type(size) is not int
+                        or size != output.stat().st_size
+                        or not isinstance(summary["has_more"], bool)
+                        or not isinstance(summary["columns"], dict)
+                    ):
+                        raise ValueError("record artifact does not match its manifest")
+                if any(not isinstance(row, dict) for row in rows):
+                    raise ValueError("invalid record row")
+                return rows
+            except (OSError, ValueError, TypeError, KeyError) as exc:
                 raise QueryError("查询返回的数据格式异常，请检查 CLI 输出文件。") from exc
 
     async def recent_expenses(self, n: int) -> list[ExpenseRecord]:
@@ -261,32 +294,6 @@ class BitableTool:
             except (KeyError, TypeError, AttributeError, ValueError) as exc:
                 raise QueryError("无法确认远端字段结构，不执行写入。") from exc
 
-    async def history(self, keyword: str, n: int = 10) -> list[dict]:
-        n = COUNT.validate_python(n)
-        keyword = keyword.strip()
-        if not keyword or len(keyword) > 100:
-            raise ValueError("invalid history keyword")
-        s = self.settings
-        # Personal habits belong to the entire table, not the demo's selected view.
-        return await self._rows(
-            "+record-list",
-            [
-                "--filter-json",
-                json.dumps(
-                    {
-                        "logic": "and",
-                        "conditions": [[s.bitable_description_field, "intersects", keyword]],
-                    },
-                    ensure_ascii=False,
-                ),
-                "--sort-json",
-                json.dumps([{"field": s.bitable_date_field, "desc": True}]),
-                "--limit",
-                str(n),
-            ],
-            categories=True,
-        )
-
     async def get_record(self, record_id: str) -> dict:
         rows = await self._rows("+record-get", ["--record-id", record_id], categories=True)
         if len(rows) != 1 or rows[0].get("record_id") != record_id:
@@ -318,37 +325,43 @@ class BitableTool:
                 raise WriteUncertain("写入字段未被完整接受，结果待核对；请检查表格。")
             return data
 
-    async def create_record(self, expense: Expense) -> str:
+    async def create_records(self, expenses: list[Expense]) -> list[str]:
+        if not 1 <= len(expenses) <= 200:
+            raise QueryError("一次消息最多新增 200 笔账单，请减少账单数量。")
         data = await self._write(
             "+record-batch-create",
             {
-                "create_records": [self.expense_fields(expense)],
+                "create_records": [self.expense_fields(expense) for expense in expenses],
             },
         )
         ids = data.get("record_id_list")
-        if not isinstance(ids, list) or len(ids) != 1 or not isinstance(ids[0], str) or not ids[0]:
-            raise WriteUncertain("未取得唯一账单 ID，写入结果待核对；请先检查表格。")
-        return ids[0]
+        if (
+            not isinstance(ids, list)
+            or len(ids) != len(expenses)
+            or any(not isinstance(value, str) or not value.strip() for value in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            raise WriteUncertain("批量账单 ID 无法逐笔对应，写入结果待核对；请先检查表格。")
+        # The successful create response supplies IDs in submission order.
+        # Read-back visibility may lag behind the accepted write.
+        return ids
 
     async def update_record(self, record_id: str, fields: dict) -> None:
-        await self._write("+record-batch-update", {"update_records": {record_id: fields}})
-        try:
-            emit("table.update_verification_start", record_id=record_id)
-            actual = await self.get_record(record_id)
-            emit("table.update_verification", record_id=record_id, expected=fields, actual=actual)
-            for name, expected in fields.items():
-                value = actual.get(name)
-                if name == self.settings.bitable_date_field:
-                    matches = datetime.fromisoformat(value) == datetime.fromisoformat(expected)
-                elif name == self.settings.bitable_amount_field:
-                    matches = Decimal(str(value)) == expected
-                else:
-                    matches = value == expected or (expected is None and value == [])
-                if not matches:
-                    raise ValueError("update not visible")
-        except (QueryError, ValueError, TypeError) as exc:
-            raise WriteUncertain("纠错已提交，但尚未核对到完整修改结果；请检查表格。") from exc
+        data = await self._write("+record-batch-update", {"update_records": {record_id: fields}})
+        if data.get("record_id_list") != [record_id]:
+            raise WriteUncertain("修改响应未完整确认目标账单，结果待核对；请检查表格。")
 
 
 # Preserve the demo's direct read diagnostic; it is not exposed to the Agent.
 BitableQueryTool = BitableTool
+
+
+def same_field(name, actual, expected, settings: Settings) -> bool:
+    try:
+        if name == settings.bitable_date_field:
+            return datetime.fromisoformat(actual) == datetime.fromisoformat(expected)
+        if name == settings.bitable_amount_field:
+            return Decimal(str(actual)) == expected
+        return actual == expected or (expected is None and actual == [])
+    except (ValueError, TypeError):
+        return False
