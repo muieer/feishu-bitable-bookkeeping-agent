@@ -2,7 +2,6 @@
   "version": "1.0.0",
   "status": "draft",
   "compatible_categories_version": "1.0.0",
-  "source": "完全虚构的演示数据，不来源于个人账单。",
   "decision_policy": {
     "priority": [
       "确认消费内容与实际用途。",
@@ -41,10 +40,6 @@
         "正餐",
         "店内用餐"
       ],
-      "historical_examples": [
-        "在示例餐厅吃面付款 24 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     },
     {
@@ -55,10 +50,6 @@
         "正餐",
         "配送用餐"
       ],
-      "historical_examples": [
-        "订了一份配送午餐，付款 27 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     },
     {
@@ -69,10 +60,6 @@
         "饮品",
         null
       ],
-      "historical_examples": [
-        "买果汁付款 12 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     },
     {
@@ -83,10 +70,6 @@
         "公共交通",
         "轨道交通"
       ],
-      "historical_examples": [
-        "乘地铁付款 5 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     },
     {
@@ -97,10 +80,6 @@
         "公共交通",
         "公交出行"
       ],
-      "historical_examples": [
-        "乘公交付款 2 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     },
     {
@@ -111,10 +90,6 @@
         "出租出行",
         null
       ],
-      "historical_examples": [
-        "乘出租车付款 32 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     },
     {
@@ -125,10 +100,6 @@
         "阅读资料",
         null
       ],
-      "historical_examples": [
-        "买了一本示例读物付款 40 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     },
     {
@@ -139,10 +110,6 @@
         "技能课程",
         null
       ],
-      "historical_examples": [
-        "报名示例绘画课付款 120 元。"
-      ],
-      "historical_count": 0,
       "boundary": "消费内容或用途不明确时返回 clarify；不根据商家名称推断。"
     }
   ],
@@ -158,6 +125,5 @@
       "reason": "缺少用餐方式，无法区分店内用餐和配送用餐。"
     }
   ],
-  "review_note": "仅用于演示结构，正式使用前按自己的分类约定调整。",
-  "examples_note": "例句与金额全部虚构；historical_count 为 0，表示无真实历史样本。"
+  "review_note": "仅用于演示结构，正式使用前按自己的分类约定调整。"
 }

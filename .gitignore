@@ -23,3 +23,6 @@ dist/
 !/knowledge/categories.example.json
 !/knowledge/rules.example.json
 !/knowledge/schema.example.json
+!/knowledge/archive/
+/knowledge/archive/*
+!/knowledge/archive/rules.example.before-cleanup-20261012.json
