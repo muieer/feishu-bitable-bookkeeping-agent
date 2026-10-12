@@ -294,32 +294,6 @@ class BitableTool:
             except (KeyError, TypeError, AttributeError, ValueError) as exc:
                 raise QueryError("无法确认远端字段结构，不执行写入。") from exc
 
-    async def history(self, keyword: str, n: int = 10) -> list[dict]:
-        n = COUNT.validate_python(n)
-        keyword = keyword.strip()
-        if not keyword or len(keyword) > 100:
-            raise ValueError("invalid history keyword")
-        s = self.settings
-        # Personal habits belong to the entire table, not the demo's selected view.
-        return await self._rows(
-            "+record-list",
-            [
-                "--filter-json",
-                json.dumps(
-                    {
-                        "logic": "and",
-                        "conditions": [[s.bitable_description_field, "intersects", keyword]],
-                    },
-                    ensure_ascii=False,
-                ),
-                "--sort-json",
-                json.dumps([{"field": s.bitable_date_field, "desc": True}]),
-                "--limit",
-                str(n),
-            ],
-            categories=True,
-        )
-
     async def get_record(self, record_id: str) -> dict:
         rows = await self._rows("+record-get", ["--record-id", record_id], categories=True)
         if len(rows) != 1 or rows[0].get("record_id") != record_id:

@@ -1,97 +1,94 @@
-"""Business tests use explicit plans and the real service/CLI/journal boundary."""
+"""Business boundaries use explicit two-stage fixtures and the real fake-CLI/journal path."""
 
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter
 
+from bookkeeping_agent.agent import normalize_source
 from bookkeeping_agent.models import Decision as PlanDecision
-from bookkeeping_agent.models import IncomingMessage, MessagePlan
+from bookkeeping_agent.models import IncomingMessage, MessagePlan, RecognitionResult
 from bookkeeping_agent.service import BookkeepingService
 from bookkeeping_agent.tools import BitableTool
 
 
 def Decision(**kwargs):
-    if isinstance(kwargs.get("expense"), dict):
+    expense = kwargs.get("expense")
+    if isinstance(expense, dict):
         kwargs["expense"] = {
             "date": None,
             "amount": None,
             "description": None,
             "category": None,
-            **kwargs["expense"],
+            **expense,
         }
-    return PlanDecision.model_validate(
-        {
-            "decision_id": "d1",
-            "source_text": "咖啡18元",
-            "continues_pending": False,
-            "target_id": None,
-            "target_number": None,
-            "expense": None,
-            "preference": None,
-            "question": None,
-            **kwargs,
-        }
+    return TypeAdapter(PlanDecision).validate_python(
+        {"bill_id": "B1", "raw": "咖啡18元", "expense": None, "reason": None, **kwargs}
     )
 
 
 def create(**overrides):
-    source = overrides.pop("source_text", "咖啡18元")
-    decision_args = {
-        k: overrides.pop(k)
-        for k in list(overrides)
-        if k
-        in {
-            "decision_id",
-            "source_occurrence",
-            "target_id",
-            "target_reference",
-            "target_number",
-            "continues_pending",
-            "question",
-            "needs_history",
-            "history_keywords",
-        }
-    }
+    args = {k: overrides.pop(k) for k in list(overrides) if k in {"bill_id", "raw"}}
     return Decision(
         action="create",
-        source_text=source,
         expense={
-            "amount": "18.10",
+            "date": "2026-10-09",
+            "amount": "18",
             "description": "咖啡",
-            "category": {"level1": "饮食", "level2": "咖啡"},
+            "category": {"level1": "饮食", "level2": "咖啡", "level3": None},
             **overrides,
         },
-        **decision_args,
+        **args,
     )
 
 
 class Engine:
-    """Bind a one-decision test fixture's source to the actual input. Multi-decision tests
-    always provide explicit source snippets, so there is no text splitting in this fake."""
+    """Fixtures expose both phases; identity binding is test setup, not app compatibility."""
 
     def __init__(self, *plans):
         self.plans = iter(plans)
-        self.contexts, self.texts = [], []
+        self.contexts, self.texts, self.recognition_calls, self.decision_calls = [], [], 0, 0
 
-    async def decide(self, text, context):
-        self.contexts.append(context)
+    async def recognize(self, text, context):
+        self.recognition_calls += 1
         self.texts.append(text)
+        self.contexts.append(context)
         value = next(self.plans)
         if isinstance(value, BaseException):
             raise value
-        if isinstance(value, MessagePlan):
+        if isinstance(value, RecognitionResult):
             return value
-        if isinstance(value, list):
-            decisions = [
-                d.model_copy(update={"decision_id": f"d{n}"}) for n, d in enumerate(value, 1)
+        if value is None:
+            self.current = []
+            return RecognitionResult(items=[])
+        self.current = (
+            value.decisions
+            if isinstance(value, MessagePlan)
+            else value
+            if isinstance(value, list)
+            else [value.model_copy(update={"raw": normalize_source(text)})]
+        )
+        return RecognitionResult(
+            items=[
+                {
+                    "type": "existing" if d.action == "update" else "new",
+                    "target_id": d.bill_id if d.action == "update" else None,
+                    "raw": d.raw,
+                }
+                for d in self.current
             ]
-        else:
-            decisions = [value.model_copy(update={"source_text": text})]
-        return MessagePlan(decisions=decisions)
+        )
+
+    async def decide(self, items, context):
+        self.decision_calls += 1
+        return MessagePlan(
+            decisions=[
+                d.model_copy(update={"bill_id": item.bill_id})
+                for item, d in zip(items, self.current, strict=True)
+            ]
+        )
 
 
 def message(text="咖啡18元", message_id="om_1", sent_at="2026-10-09T10:00:00+08:00", **kwargs):
@@ -99,8 +96,8 @@ def message(text="咖啡18元", message_id="om_1", sent_at="2026-10-09T10:00:00+
         message_id=message_id,
         user_id=kwargs.get("user_id", "ou_1"),
         chat_id=kwargs.get("chat_id", "oc_1"),
-        text=text,
         sent_at=sent_at,
+        text=text,
     )
 
 
@@ -114,356 +111,205 @@ def written(fake_cli):
     return json.loads(path.read_text()) if path.exists() else []
 
 
-def bill(s, index=0):
-    return list(s.sessions[("ou_1", "oc_1")].bills.values())[index]
+def calls(fake_cli):
+    path = Path(fake_cli[0]).with_name("calls.jsonl")
+    return (
+        [json.loads(row)["args"] for row in path.read_text().splitlines()] if path.exists() else []
+    )
 
 
-async def test_create_exact_amount_date_dedup_restart(settings, fake_cli):
-    s = service(settings, fake_cli, create(amount="0.29"))
-    assert "0.29元" in await s.reply(message())
-    assert written(fake_cli)[0]["金额"] == 0.29
-    assert written(fake_cli)[0]["记账日期"].startswith("2026-10-09")
-    assert await s.reply(message()) is None
-    restarted = service(settings, fake_cli)
-    assert await restarted.reply(message()) is None and not restarted.sessions
+async def test_create_and_explicit_update_only_changed_fields(settings, fake_cli):
+    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "25"}))
+    assert "B1：2026/10/09｜饮食｜咖啡｜咖啡｜18元" in await s.reply(message())
+    original = written(fake_cli)[0]
+    result = await s.reply(message("B1账单金额更新为25元", message_id="om_2"))
+    assert "已更新消费记录" in result and "B1：" in result and "25元" in result
+    assert written(fake_cli)[0] == {**original, "金额": 25}
+    payload = json.loads(Path(fake_cli[0]).with_name("payload-capture.json").read_text())
+    assert payload == {"update_records": {original["record_id"]: {"金额": 25}}}
+    bill = s.sessions[("ou_1", "oc_1")].bills["B1"]
+    assert bill.record_id == original["record_id"] and bill.confirmed.amount == 25
+
+
+async def test_no_consumption_stops_after_recognition_and_deduplicates(settings, fake_cli):
+    s = service(settings, fake_cli, None)
+    assert await s.reply(message("我很开心")) == "此次不包含消费行为。"
+    assert s.engine.recognition_calls == 1 and s.engine.decision_calls == 0
+    assert not calls(fake_cli)
+    assert await s.reply(message("我很开心")) is None
+
+
+async def test_clarify_has_identity_but_no_pending_bill_or_followup(settings, fake_cli):
+    s = service(
+        settings, fake_cli, Decision(action="clarify", reason="分类依据不足"), create(amount="25")
+    )
+    assert "B1：咖啡18元。原因：分类依据不足" in await s.reply(message())
+    session = s.sessions[("ou_1", "oc_1")]
+    assert session.bills["B1"].facts == {} and session.bills["B1"].confirmed is None
+    assert not calls(fake_cli)
+    response = await s.reply(message("咖啡25元", message_id="om_2"))
+    assert "B2：" in response and "B1：" not in response
     assert len(written(fake_cli)) == 1
-
-
-@pytest.mark.parametrize("amount", ["0", "-1", "1.001", "1000000000000.00"])
-async def test_invalid_amount_is_independent_business_failure(settings, fake_cli, amount):
-    s = service(
-        settings,
-        fake_cli,
-        [create(amount=amount, source_text="坏账1元"), create(source_text="咖啡18元")],
-    )
-    response = await s.reply(message("坏账1元咖啡18元"))
-    assert "成功1笔，待补充1笔" in response
-    assert len(written(fake_cli)) == 1
-
-
-@pytest.mark.parametrize("amount", [True, "NaN", "Infinity"])
-def test_unparseable_amount_rejects_schema(amount):
-    with pytest.raises(ValidationError):
-        create(amount=amount)
-
-
-async def test_invalid_category_future_date_missing_facts_do_not_write(settings, fake_cli):
-    s = service(
-        settings,
-        fake_cli,
-        [
-            create(source_text="甲1元", category={"level1": "饮食", "level2": "汽车"}),
-            create(source_text="乙2元", date="2026-10-10"),
-            create(source_text="丙3元", description=None),
-        ],
-    )
-    response = await s.reply(message("甲1元乙2元丙3元"))
-    assert "待补充3笔" in response and not written(fake_cli)
-
-
-async def test_timezone_and_pending_original_anchor(settings, fake_cli):
-    s = service(settings, fake_cli, create())
-    assert "2026/10/10" in await s.reply(message(sent_at="2026-10-09T20:00:00+00:00"))
-    s = service(
-        settings,
-        fake_cli,
-        Decision(
-            action="clarify",
-            expense={"amount": "25", "description": "午饭"},
-            question="堂食还是外卖？",
-        ),
-        Decision(
-            action="create",
-            continues_pending=True,
-            expense={"category": {"level1": "饮食", "level2": "堂食"}},
-        ),
-    )
-    await s.reply(message("午饭25元", message_id="om_2", sent_at="2026-10-09T23:59:00+08:00"))
-    response = await s.reply(
-        message("堂食", message_id="om_3", sent_at="2026-10-11T00:01:00+08:00")
-    )
-    assert "2026/10/09" in response and "25元" in response
-    assert s.engine.contexts[-1]["pending_items"][0]["sent_at"].startswith("2026-10-09")
-
-
-async def test_new_consumption_does_not_clear_or_inherit_pending(settings, fake_cli):
-    s = service(settings, fake_cli, Decision(action="clarify", question="买了什么？"), create())
-    await s.reply(message("买东西", sent_at="2026-10-09T23:59:00+08:00"))
-    response = await s.reply(
-        message("咖啡18元", message_id="om_2", sent_at="2026-10-10T00:01:00+08:00")
-    )
-    assert "2026/10/10" in response and "待补充1笔" in response
-    assert bill(s).status == "pending" and bill(s, 1).facts["amount"] == "18.10"
-
-
-async def test_multiple_supplements_keep_known_facts(settings, fake_cli):
-    s = service(
-        settings,
-        fake_cli,
-        Decision(action="clarify", expense={"description": "午饭"}, question="多少钱？"),
-        Decision(
-            action="clarify",
-            expense={"amount": "25"},
-            question="堂食还是外卖？",
-            continues_pending=True,
-        ),
-        Decision(
-            action="create",
-            expense={"category": {"level1": "饮食", "level2": "堂食"}},
-            continues_pending=True,
-        ),
-    )
-    await s.reply(message("午饭"))
-    await s.reply(message("25元", message_id="om_2"))
-    assert "午饭｜25元" in await s.reply(message("堂食", message_id="om_3"))
-    assert len(written(fake_cli)) == 1
-
-
-async def test_correction_only_changes_patch_and_clears_third_level(settings, fake_cli):
-    s = service(
-        settings,
-        fake_cli,
-        create(category={"level1": "交通通信", "level2": "汽车", "level3": "充电"}),
-        Decision(action="update", expense={"amount": "28"}),
-        Decision(action="update", expense={"category": {"level1": "饮食", "level2": "咖啡"}}),
-    )
-    await s.reply(message())
-    assert "已修改" in await s.reply(message("不对，刚才是28元", message_id="om_2"))
-    assert written(fake_cli)[0]["三级分类"] == ["充电"]
-    assert "已修改" in await s.reply(message("分类改为咖啡", message_id="om_3"))
-    assert len(written(fake_cli)) == 1 and written(fake_cli)[0]["三级分类"] is None
-    assert not settings.preferences_path.exists()
+    assert "pending_items" not in s.engine.contexts[-1]
 
 
 @pytest.mark.parametrize(
-    "mode",
-    [
-        "external_edit",
-        "ignored_fields",
-        "missing_id",
-        "wrong_id",
-        "empty_ids",
-        "duplicate_ids",
-        "extra_ids",
-        "invalid_ids",
-        "write_failure",
-    ],
+    "mode", ["external_edit", "bad_manifest_count", "duplicate_rows", "missing_file"]
 )
-async def test_correction_rejects_external_changes_or_unconfirmed_response(
+async def test_update_preflight_failure_never_overwrites_remote(
     settings, fake_cli, monkeypatch, mode
 ):
-    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
+    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "25"}))
     await s.reply(message())
     monkeypatch.setenv("FAKE_CLI_MODE", mode)
-    response = await s.reply(message("改为28元", message_id="om_2"))
-    assert "已修改" not in response
-    assert "核对" in response or "未确认成功" in response
-    assert bill(s).status == ("failed" if mode == "external_edit" else "uncertain")
+    response = await s.reply(message("B1改为25元", message_id="om_2"))
+    assert "执行失败" in response and "已更新" not in response
+    assert written(fake_cli)[0]["金额"] == 18
+    assert not any(c[1] == "+record-batch-update" for c in calls(fake_cli))
 
 
-async def test_correction_confirms_response_without_readback(settings, fake_cli, monkeypatch):
-    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
-    await s.reply(message())
-    monkeypatch.setenv("FAKE_CLI_MODE", "update_not_applied")
-    response = await s.reply(message("改为28元", message_id="om_2"))
-    assert "已修改" in response and "28元" in response
-    assert bill(s).status == "success" and str(bill(s).confirmed.amount) == "28"
-    assert s.journal.get(bill(s).operation_id)["status"] == "success"
-    calls = [
-        json.loads(line)
-        for line in Path(fake_cli[0]).with_name("calls.jsonl").read_text().splitlines()
-    ]
-    commands = [call["args"][1] for call in calls]
-    assert commands.count("+record-get") == 1
-    assert commands[-1] == "+record-batch-update"
-    assert written(fake_cli)[0]["金额"] == 18.1
-    assert await s.reply(message("改为28元", message_id="om_2")) is None
+@pytest.mark.parametrize("amount", [None, "0", "-1", "1.001", "100000000000000"])
+async def test_business_invalid_amount_is_failure_not_model_clarify(settings, fake_cli, amount):
+    s = service(settings, fake_cli, create(amount=amount))
+    response = await s.reply(message())
+    assert "执行失败" in response and "有效金额" in response
+    assert "以下消费记录未写入" not in response and not written(fake_cli)
 
 
-@pytest.mark.parametrize("other", [{"user_id": "ou_other"}, {"chat_id": "oc_other"}])
-async def test_context_isolation(settings, fake_cli, other):
-    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
-    await s.reply(message())
-    assert "没有可纠错" in await s.reply(message("刚才改为28元", message_id="om_2", **other))
-    assert written(fake_cli)[0]["金额"] == 18.1
-
-
-async def test_context_expiry(settings, fake_cli):
-    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
-    await s.reply(message())
-    s.sessions[("ou_1", "oc_1")].touched -= settings.context_ttl_seconds + 1
-    assert "没有可纠错" in await s.reply(message("改为28元", message_id="om_2"))
-
-
-def preference(evidence="以后豆浆都归食品", **kwargs):
-    return Decision(
-        action="preference",
-        source_text=evidence,
-        preference={
-            "subject": "豆浆",
-            "condition": "以后豆浆归食品",
-            "evidence": evidence,
-            "category": {"level1": "饮食", "level2": "食品"},
-            **kwargs,
-        },
+async def test_invalid_category_and_missing_tertiary_rejected(settings, fake_cli):
+    s = service(
+        settings,
+        fake_cli,
+        create(category={"level1": "交通通信", "level2": "汽车", "level3": None}),
     )
+    assert "分类路径无效" in await s.reply(message())
+    assert not written(fake_cli)
 
 
-async def test_preference_updates_existing_and_no_historical_reclassification(settings, fake_cli):
+async def test_future_date_rejected(settings, fake_cli):
+    s = service(settings, fake_cli, create(date="2026-10-10"))
+    assert "消费日期在未来" in await s.reply(message())
+    assert not written(fake_cli)
+
+
+@pytest.mark.parametrize("mode", ["missing_id", "write_failure", "ignored_fields"])
+async def test_uncertain_write_is_never_retried_on_redelivery_or_restart(
+    settings, fake_cli, monkeypatch, mode
+):
+    s = service(settings, fake_cli, create())
+    monkeypatch.setenv("FAKE_CLI_MODE", mode)
+    response = await s.reply(message())
+    assert "待核对" in response and "已记账消费" not in response
+    assert await s.reply(message()) is None
+    assert await service(settings, fake_cli).reply(message()) is None
+    assert sum(c[1] == "+record-batch-create" for c in calls(fake_cli)) == 1
+
+
+async def test_update_uncertain_cannot_be_updated_again(settings, fake_cli, monkeypatch):
     s = service(
         settings,
         fake_cli,
         create(),
-        preference(),
-        preference(category={"level1": "饮食", "level2": "咖啡"}),
+        Decision(action="update", expense={"amount": "25"}),
+        Decision(action="update", expense={"amount": "30"}),
     )
     await s.reply(message())
-    await s.reply(message("以后豆浆都归食品", message_id="om_2"))
-    await s.reply(message("以后豆浆都归食品", message_id="om_3"))
-    assert len(s.knowledge.preferences()) == 1
-    assert s.knowledge.preferences()[0].category.level2 == "咖啡"
-    assert written(fake_cli)[0]["金额"] == 18.1
-    assert len(service(settings, fake_cli).knowledge.preferences()) == 1
+    monkeypatch.setenv("FAKE_CLI_MODE", "wrong_id")
+    assert "待核对" in await s.reply(message("B1改为25元", message_id="om_2"))
+    monkeypatch.setenv("FAKE_CLI_MODE", "ok")
+    assert "待核对" in await s.reply(message("B1改为30元", message_id="om_3"))
+    assert sum(c[1] == "+record-batch-update" for c in calls(fake_cli)) == 1
 
 
-@pytest.mark.parametrize(
-    "text,kwargs",
-    [
-        ("这次豆浆归食品", {}),
-        ("以后豆浆都归食品", {"category": {"level1": "饮食", "level2": "汽车"}}),
-    ],
-)
-async def test_preference_requires_authorization_and_valid_path(settings, fake_cli, text, kwargs):
-    s = service(settings, fake_cli, preference(**kwargs))
-    assert "尚未保存" in await s.reply(message(text))
-    assert not settings.preferences_path.exists()
-
-
-@pytest.mark.parametrize("mode", ["missing_id", "write_failure", "write_timeout"])
-async def test_uncertain_writes_block_bill_followup(settings, fake_cli, monkeypatch, mode):
-    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "20"}))
-    settings.cli_timeout_seconds = 0.15 if mode == "write_timeout" else 3
-    monkeypatch.setenv("FAKE_CLI_MODE", mode)
-    assert "已记账" not in await s.reply(message())
-    assert bill(s).status == "uncertain"
-    monkeypatch.delenv("FAKE_CLI_MODE")
-    assert "待核对" in await s.reply(message("金额改为20元", message_id="om_2"))
-    assert len(written(fake_cli)) <= 1
-
-
-@pytest.mark.parametrize("mode", ["schema_drift", "failure", "false_success"])
-async def test_preflight_failure_is_unexecuted(settings, fake_cli, monkeypatch, mode):
+async def test_cancelled_write_is_uncertain_and_durable(settings, fake_cli, monkeypatch):
     s = service(settings, fake_cli, create())
-    monkeypatch.setenv("FAKE_CLI_MODE", mode)
-    response = await s.reply(message())
-    assert "已记账" not in response and bill(s).status == "failed" and not written(fake_cli)
-    assert not s.journal.get(f"bill/{bill(s).bill_id}/create")
+    monkeypatch.setenv("FAKE_CLI_MODE", "write_timeout")
+    task = asyncio.create_task(s.reply(message()))
+    started = Path(fake_cli[0]).with_name("write_started")
+    async with asyncio.timeout(3):
+        while not started.exists():
+            await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    bill = s.sessions[("ou_1", "oc_1")].bills["B1"]
+    assert bill.status == "uncertain" and s.journal.get("om_1")["status"] == "started"
+    assert "待核对" in await service(settings, fake_cli).reply(message())
 
 
-async def test_truncated_schema_options_are_loaded(settings, fake_cli, monkeypatch):
-    s = service(settings, fake_cli, create())
-    monkeypatch.setenv("FAKE_CLI_MODE", "truncated")
-    assert "已记账" in await s.reply(message())
-
-
-async def test_journal_failure_prevents_submission(settings, fake_cli, monkeypatch):
-    s = service(settings, fake_cli, create())
-    monkeypatch.setattr(s.journal, "save", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
-    assert "未执行写入" in await s.reply(message()) and not written(fake_cli)
-
-
-async def test_batch_reservation_failure_prevents_submission(settings, fake_cli, monkeypatch):
-    s = service(settings, fake_cli, create())
-    monkeypatch.setattr(
-        s.journal, "reserve_operations", lambda *a: (_ for _ in ()).throw(OSError("disk"))
+async def test_context_scope_expiry_and_ids_cannot_target_other_users(settings, fake_cli):
+    s = service(
+        settings,
+        fake_cli,
+        create(),
+        Decision(action="update", expense={"amount": "25"}),
+        create(),
+        create(),
     )
-    assert "未执行写入" in await s.reply(message()) and not written(fake_cli)
+    await s.reply(message())
+    assert "消息理解失败" in await s.reply(
+        message("B1改为25元", message_id="om_2", user_id="ou_other")
+    )
+    session = s.sessions[("ou_1", "oc_1")]
+    session.touched -= settings.context_ttl_seconds + 1
+    assert "B1：" in await s.reply(message(message_id="om_3"))
+    assert "B2：" in await s.reply(message(message_id="om_4"))
+    assert len(written(fake_cli)) == 3
 
 
-async def test_local_failure_after_remote_confirmation_preserves_success(
-    settings, fake_cli, monkeypatch
-):
+async def test_schema_drift_blocks_all_writes(settings, fake_cli, monkeypatch):
+    s = service(settings, fake_cli, create())
+    monkeypatch.setenv("FAKE_CLI_MODE", "schema_drift")
+    assert "字段不存在或类型不符" in await s.reply(message())
+    assert not written(fake_cli)
+
+
+async def test_local_journal_failure_blocks_write(settings, fake_cli, monkeypatch):
+    s = service(settings, fake_cli, create())
+    monkeypatch.setattr(s.journal, "save", lambda *a, **kw: (_ for _ in ()).throw(OSError()))
+    assert "无法保存去重状态" in await s.reply(message())
+    assert not written(fake_cli)
+
+
+async def test_confirmed_write_survives_journal_result_failure(settings, fake_cli, monkeypatch):
     s = service(settings, fake_cli, create())
     save = s.journal.save
 
-    def fail(mid, status, **metadata):
-        if status == "success":
-            raise OSError("disk")
-        save(mid, status, **metadata)
+    def failed(operation, status, **metadata):
+        if status == "success" and "/bill/" in operation:
+            raise OSError()
+        save(operation, status, **metadata)
 
-    monkeypatch.setattr(s.journal, "save", fail)
+    monkeypatch.setattr(s.journal, "save", failed)
     response = await s.reply(message())
-    assert "已记账" in response and "去重状态保存失败" in response
-    assert bill(s).status == "success"
-    assert "待核对" in await service(settings, fake_cli).reply(message())
+    assert "已记账" in response and "本地去重状态保存失败" in response
     assert len(written(fake_cli)) == 1
 
 
-async def test_unparseable_envelope_and_model_error_never_call_cli(settings, fake_cli):
-    s = service(settings, fake_cli)
-    s.engine.decide = AsyncMock(return_value={"decisions": [create().model_dump(), {"bad": True}]})
-    assert "理解失败" in await s.reply(message())
-    s.engine.decide = AsyncMock(side_effect=TimeoutError())
-    assert "超时" in await s.reply(message(message_id="om_2"))
-    s.engine.decide = AsyncMock(side_effect=RuntimeError("private-secret"))
-    assert "private-secret" not in await s.reply(message(message_id="om_3"))
-    assert not Path(fake_cli[0]).with_name("args.json").exists()
+async def test_two_stage_timeout_has_no_write(settings, fake_cli):
+    s = service(settings, fake_cli, create())
+    settings.agent_timeout_seconds = 0.01
+
+    async def slow(*args):
+        await asyncio.sleep(1)
+
+    s.engine.decide = slow
+    assert "超时" in await s.reply(message())
+    assert not written(fake_cli)
+    assert s.sessions[("ou_1", "oc_1")].next_number == 2
 
 
-async def test_chat_order_serializes_understanding_and_execution(settings, fake_cli):
-    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
-    decide = s.engine.decide
-    active = 0
-
-    async def serial(text, context):
-        nonlocal active
-        active += 1
-        assert active == 1
-        await asyncio.sleep(0.01)
-        result = await decide(text, context)
-        active -= 1
-        return result
-
-    s.engine.decide = serial
-    responses = await asyncio.gather(
-        s.reply(message()), s.reply(message("刚才改为28元", message_id="om_2"))
-    )
-    assert "已记账" in responses[0] and "已修改" in responses[1]
-    assert len(written(fake_cli)) == 1
+async def test_unchanged_update_checks_remote_but_sends_no_write(settings, fake_cli):
+    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "18"}))
+    await s.reply(message())
+    assert "已更新" in await s.reply(message("B1金额改为18元", message_id="om_2"))
+    assert not any(c[1] == "+record-batch-update" for c in calls(fake_cli))
 
 
-async def test_question_prevents_write_of_complete_expense(settings, fake_cli):
-    s = service(settings, fake_cli, create(question="消费用途是什么？"))
-    assert "用途" in await s.reply(message()) and not written(fake_cli)
-
-
-async def test_ignore_preserves_pending_but_clears_latest_mapping(settings, fake_cli):
+async def test_existing_unsuccessful_cannot_be_recreated(settings, fake_cli):
     s = service(
-        settings,
-        fake_cli,
-        Decision(action="clarify", question="买了什么？"),
-        Decision(action="ignore"),
+        settings, fake_cli, create(amount=None), Decision(action="update", expense={"amount": "25"})
     )
-    await s.reply(message("买东西"))
-    assert (
-        await s.reply(message("明天打算买咖啡", message_id="om_2"))
-        == "这条消息未涉及实际消费，本次未记账。"
-    )
-    assert bill(s).status == "pending" and s.sessions[("ou_1", "oc_1")].display == []
-
-
-async def test_cancel_pending_and_reject_cancel_of_uncertainty(settings, fake_cli):
-    s = service(
-        settings,
-        fake_cli,
-        Decision(action="clarify", question="买了什么？"),
-        Decision(action="ignore", cancel_pending=True),
-        create(),
-        Decision(action="ignore", cancel_pending=True, target_number=1),
-    )
-    await s.reply(message("买东西"))
-    assert "已取消" in await s.reply(message("取消记账", message_id="om_2"))
-    assert bill(s).status == "cancelled"
-    await s.reply(message("咖啡18元", message_id="om_3"))
-    assert "只能取消" in await s.reply(message("取消第一笔", message_id="om_4"))
-    assert len(written(fake_cli)) == 1
+    await s.reply(message())
+    assert "尚未成功写入" in await s.reply(message("B1改为25元", message_id="om_2"))
+    assert not written(fake_cli)

@@ -54,9 +54,9 @@ async def test_sdk_event_agent_subprocess_reply_and_dedup(
     assert mock_reactions.await_args_list == [call("om_test", "OneSecond")]
     chat_id, payload, opts = send.call_args.args
     assert chat_id == "oc_test" and opts == {"reply_to": "om_test"}
-    assert "已收到" in json.dumps(payload, ensure_ascii=False)
+    assert "已耗时" in json.dumps(payload, ensure_ascii=False)
     final = json.dumps(mock_card_updates.call_args.args[1], ensure_ascii=False)
-    assert "已记账" in final and "18.1元" in final
+    assert "已记账" in final and "18元" in final
     assert recorded()["args"][:2] == ["base", "+record-batch-create"]
 
 
@@ -64,9 +64,7 @@ async def test_nonexpense_replies_without_calling_cli(
     settings, fake_cli, monkeypatch, mock_card_updates
 ):
     settings.lark_cli_path, recorded = fake_cli
-    service = BookkeepingService(
-        settings, BitableTool(settings), decision_model({"action": "ignore"})
-    )
+    service = BookkeepingService(settings, BitableTool(settings), decision_model(None))
     channel = build_channel(settings)
     send = AsyncMock(return_value=SendResult(success=True, message_id="om_reply"))
     monkeypatch.setattr(channel, "send", send)
@@ -74,7 +72,7 @@ async def test_nonexpense_replies_without_calling_cli(
     await channel._handle_message_event(event("明天准备买咖啡"))
     send.assert_awaited_once()
     final = json.dumps(mock_card_updates.call_args.args[1], ensure_ascii=False)
-    assert "未涉及实际消费" in final and "本次未记账" in final
+    assert "此次不包含消费行为。" in final
     with pytest.raises(FileNotFoundError):
         recorded()
 

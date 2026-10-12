@@ -1,7 +1,6 @@
 import json
 
-import pytest
-from test_service import Decision, create, message, preference, service, written
+from test_service import create, message, service
 
 from bookkeeping_agent.progress import ProgressState, progress_scope
 
@@ -24,78 +23,29 @@ async def run(s, incoming=None):
     return state, snapshots
 
 
-async def test_real_create_events_no_success_until_confirmation(settings, fake_cli):
-    s = service(settings, fake_cli, create(description='包子 **大份** <at id="all">\r\n热饮'))
-    state, snapshots = await run(s)
-    assert state.title == "已记账" and state.status == "已完成"
-    assert '包子 **大份** <at id=\\"all\\"> 热饮' in text(state.snapshot())
-    elements = state.snapshot()["body"]["elements"]
-    assert elements[-1]["text"]["tag"] == "plain_text"
-    assert next(e for e in elements if e["tag"] == "collapsible_panel")["expanded"] is False
-    before_confirmation = snapshots[
-        : next(i for i, (stage, _) in enumerate(snapshots) if stage == "table.confirmed")
-    ]
-    assert all("已记账：" not in text(card) for _, card in before_confirmation)
-    assert not any(stage.startswith("table.create_verification") for stage, _ in snapshots)
-    assert not any(step.key == "verify" for step in state.steps)
-    assert all(step.status == "completed" for step in state.steps)
+async def test_processing_only_elapsed_even_after_confirmation(settings, fake_cli):
+    state, snapshots = await run(service(settings, fake_cli, create()))
+    assert state.status == "已完成" and "已记账消费记录" in text(state.snapshot())
+    for _, card in snapshots:
+        assert len(card["body"]["elements"]) == 1
+        content = card["body"]["elements"][0]["text"]["content"]
+        assert content.startswith("已耗时 ")
+        assert "咖啡" not in text(card) and "正在" not in text(card)
+        assert "执行过程" not in text(card) and "collapsible_panel" not in text(card)
 
 
-async def test_correction_confirmed_after_write_response(settings, fake_cli):
-    s = service(settings, fake_cli, create(), Decision(action="update", expense={"amount": "28"}))
-    await s.reply(message())
-    state, snapshots = await run(s, message("刚才改为28元", message_id="om_2"))
-    assert not any(stage.startswith("table.update_verification") for stage, _ in snapshots)
-    assert not any(step.key == "verify" for step in state.steps)
-    before_confirmation = snapshots[
-        : next(i for i, (stage, _) in enumerate(snapshots) if stage == "table.confirmed")
-    ]
-    assert all("已修改：" not in text(card) for _, card in before_confirmation)
-    assert state.title == "已修改" and all(step.status == "completed" for step in state.steps)
-    assert "28元" in text(state.snapshot())
-
-
-@pytest.mark.parametrize("mode", ["missing_id", "write_failure", "ignored_fields"])
-async def test_uncertain_feedback_never_claims_completed(settings, fake_cli, monkeypatch, mode):
-    s = service(settings, fake_cli, create())
-    monkeypatch.setenv("FAKE_CLI_MODE", mode)
-    state, _ = await run(s)
-    assert state.status == "结果待核对" and "已记账：" not in text(state.snapshot())
-    assert "勿重复" in state.response
-
-
-@pytest.mark.parametrize(
-    "d,status,title",
-    [
-        (Decision(action="ignore"), "已结束", "本次未记账"),
-        (Decision(action="clarify", question="堂食还是外卖？"), "待补充", "请补充或确认"),
-    ],
-)
-async def test_nonwrites_feedback(settings, fake_cli, d, status, title):
-    state, _ = await run(service(settings, fake_cli, d))
-    assert state.status == status and state.title == title
-    assert not written(fake_cli)
-
-
-async def test_preference_does_not_show_previous_expense(settings, fake_cli):
-    s = service(settings, fake_cli, create(), preference())
-    await s.reply(message())
-    state, _ = await run(s, message("以后豆浆都归食品", message_id="om_2"))
-    assert state.title == "已保存分类偏好" and "金额" not in state.result_text()
-
-
-def test_waiting_elapsed_finish_freezes():
+def test_elapsed_includes_queue_and_final_freezes():
     now = [0]
     state = ProgressState(queued=True, clock=lambda: now[0])
     now[0] = 3
-    assert "已等待 3 秒" in text(state.snapshot())
+    assert "已耗时 3 秒" in text(state.snapshot())
     state.start()
     now[0] = 11
-    assert "已执行 8 秒" in text(state.snapshot())
+    assert "已耗时 11 秒" in text(state.snapshot())
     state.finish("结束")
     card = state.snapshot()
     now[0] = 500
-    state.on_event("history.query", {})
+    state.on_event("agent.instructions", {"instructions": "不应显示的内容"})
     assert state.snapshot() == card
 
 
@@ -103,6 +53,5 @@ async def test_observer_failure_does_not_prevent_write(settings, fake_cli):
     def broken(*args):
         raise RuntimeError("observer")
 
-    s = service(settings, fake_cli, create())
     with progress_scope(broken):
-        assert "已记账" in await s.reply(message())
+        assert "已记账" in await service(settings, fake_cli, create()).reply(message())

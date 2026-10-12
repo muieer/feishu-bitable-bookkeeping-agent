@@ -10,4 +10,4 @@ def bill_label(date, category, description, amount):
     fields = [str(date).replace("-", "/")]
     fields.extend(category[key] for key in ("level1", "level2", "level3") if category.get(key))
     fields.extend((description, amount_text + "元"))
-    return "｜".join(fields)
+    return "｜".join(" ".join(value.splitlines()) for value in fields)

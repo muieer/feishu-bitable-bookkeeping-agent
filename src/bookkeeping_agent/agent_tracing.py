@@ -12,6 +12,7 @@ from pydantic_ai.capabilities import Capability
 from pydantic_ai.messages import RetryPromptPart
 from pydantic_ai.models import get_user_agent
 
+from .request_budget import reserve_message_request
 from .tracing import emit, require, run_state
 
 
@@ -83,6 +84,10 @@ class TracedHTTPClient(httpx2.AsyncClient):
     async def _send_single_request(self, request):
         # Redirects inside send() also cross this boundary; count every HTTP attempt.
         require()
+        message_attempt = reserve_message_request()
+        if message_attempt is not None:
+            emit("llm.message_budget_reserved", attempt=message_attempt, limit=10)
+            require()
         if self.request_budget is not None:
             attempt = self.request_budget.reserve()
             emit("llm.budget_reserved", attempt=attempt, limit=self.request_budget.limit)
@@ -160,13 +165,7 @@ class AgentTraceCapability(Capability):
                     emit(
                         "agent.retry_feedback",
                         feedback=part,
-                        retry_kind=(
-                            "function_tool"
-                            if part.tool_name == "search_history"
-                            else "output_validation"
-                            if part.tool_name
-                            else "model_output"
-                        ),
+                        retry_kind="output_validation" if part.tool_name else "model_output",
                         # Generic node RunContext has default retry=0/max_retries=0.
                         # The preparation hook supplies the real budget snapshot for this request.
                         retry_before_request=state.get("output_retry") if state else None,

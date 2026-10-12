@@ -46,7 +46,7 @@ async def test_immediate_reply_queue_live_progress_and_final_order(
 
     async def update(mid, card):
         updates.append((mid, card))
-        if mid == "reply_om_first" and "处理中" in text(card):
+        if mid == "reply_om_first" and "已耗时" in text(card):
             live.set()
         return SendResult(success=True, message_id=mid)
 
@@ -58,18 +58,19 @@ async def test_immediate_reply_queue_live_progress_and_final_order(
     second = None
     try:
         await asyncio.wait_for(first_running.wait(), 1)
-        assert "已收到" in text(sends[0][0])
+        assert "已耗时" in text(sends[0][0])
         assert sends[0][1] == {"reply_to": "om_first"}
         second = asyncio.create_task(channel._handle_message_event(event(message_id="om_second")))
         await asyncio.wait_for(second_received.wait(), 1)
-        assert "等待上一条消息" in text(sends[1][0])
+        assert "已耗时" in text(sends[1][0])
         await asyncio.wait_for(live.wait(), 1)
-        assert "正在理解" in text(updates[0][1])
+        assert "已耗时" in text(updates[0][1])
+        assert "正在理解" not in text(updates[0][1])
         assert "已记账" not in text(updates[0][1])
         release.set()
         await asyncio.gather(first, second)
         final = {mid: card for mid, card in updates}
-        for mid, amount in [("reply_om_first", "18.1"), ("reply_om_second", "29")]:
+        for mid, amount in [("reply_om_first", "18"), ("reply_om_second", "29")]:
             elements = final[mid]["body"]["elements"]
             assert elements[-1]["text"]["content"].endswith(f"｜{amount}元")
         count = len(updates)
@@ -267,7 +268,7 @@ async def test_diagnostic_failure_after_final_delivery_never_resends(
         if call.args[1]["body"]["elements"][-1]
         .get("text", {})
         .get("content", "")
-        .startswith("已记账：")
+        .startswith("1. B1：")
     ]
     assert len(finals) == 1
     assert mock_card_updates.call_args.args[1] == finals[0]

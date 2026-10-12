@@ -1,46 +1,39 @@
-# 系统提示词接入合同
+# 两阶段提示词合同
 
-默认提示词为 `system.md`；`AGENT_SYSTEM_PROMPT_PATH` 可指定其他 UTF-8 文件。启动时读取，文件缺失或为空则停止启动 Agent。修改后须重启。代码不内置替代业务提示词。
+两阶段各使用独立 UTF-8 文件：`RECOGNITION_PROMPT_PATH` 默认 `prompts/recognition.md`，`DECISION_PROMPT_PATH` 默认 `prompts/decision.md`。文件缺失或为空时 Agent 不启动。修改后需要重启。程序不内置替代业务提示词。
 
-## 完整消息与结构化输出
+## 第一阶段：识别与规范化
 
-单笔和多笔统一使用 `MessagePlan.decisions`，一条完整消息先进行一次推理，最多返回 200 个决策。程序不按标点拆消息；同一业务对象本轮只返回一个最终决策。结构化解析失败时整条消息不执行写入。
+输入为完整消息和当前上下文中的结构化消费记录。模型只识别交易语义、关联已有编号、规范化文本；不推理分类、日期或最终行为。
 
-| 字段 | 合同 |
+```json
+{"items":[{"type":"new","target_id":null,"raw":"咖啡12元"},{"type":"existing","target_id":"B1","raw":"B1金额改为20元"}]}
+```
+
+`items` 必填，最多 200 项，无消费为 `[]`。每项必须包含且只能包含 `type`、`target_id`、`raw`。`type` 只允许 `new` 或 `existing`；新消费目标必须 null，已有消费目标必须为合法格式的 B 编号。原文非空，不允许额外字段或自由文本。
+
+程序再检查已有编号属于当前用户与会话，目标没有重复，原文可在规范化的完整消息中按顺序定位且不重叠。新消费由程序编号。识别失败时不进入决策或写入；无消费时回复「此次不包含消费行为。」且不进行表格操作。
+
+## 第二阶段：推理与决策
+
+输入包括 `items`（`bill_id`、`type`、`raw`）、`message_sent_at`、`timezone`、`default_date`、`related_existing`，以及完整 `categories` 和 `personal_rules`。没有全部历史对话、动态消费检索或偏好存储。每笔只使用自身信息和相关已有账单，不使用另一笔的日期、金额、用途或分类。
+
+`MessagePlan.decisions` 必须与输入 B 编号一一对应，每个编号一个决策。`raw` 必须复制输入。新消费只能 `create` 或 `clarify`；已有消费只能 `update` 或 `clarify`。不能增加、删除、合并、拆分或重编号。
+
+| 字段 | 约束 |
 | --- | --- |
-| `decision_id` | 本消息内唯一标识；历史阶段保留原 ID |
-| `source_text`、`source_occurrence` | 表达该意图的当前消息连续原文及出现序号；来源必须真实存在，独立新账单来源不能重叠或重复 |
-| `action` | `ignore`、`create`、`update`、`clarify`、`preference`；同一消息可混合不同操作 |
-| `expense` | 必填，可为 null；create/update 必须为对象，其中 date、amount、description、category 都必填，未知或未修改值为 null；追问保留已知事实 |
-| `continues_pending` | 必填；补充已有待办为 true，新消费为 false |
-| `target_id`、`target_number` | 必填，可为 null；分别关联允许操作的稳定账单 ID 或最新回复编号，不能引用其他用户或会话的记录 |
-| `target_reference` | 自然语言关联稳定 ID 时的原文引用，须唯一匹配已有账单描述或原文 |
-| `question`、`unresolved` | question 必填，可为 null；clarify 必须提供问题。有问题或未解决字段时不执行该笔写入 |
-| `clarification_scope` | `expense` 保存账单事实；`target` 仅追问目标或意图，不创建待办 |
-| `needs_history`、`history_keywords` | 已确认消费且分类需要历史时使用；关键词最多两个，程序去重查询 |
-| `preference` | 必填，可为 null；preference 决策必须提供对象、适用条件、完整分类及长期意图证据，其他操作为 null |
-| `cancel_pending` | 明确取消未提交待办时用 ignore 并指定目标；不能删除成功账单或重试待核对结果 |
+| `bill_id` | 必填，`B[1-9][0-9]*`，属于程序提供的编号集合 |
+| `action` | 必填，判别联合类型：`create`、`update`、`clarify` |
+| `raw` | 必填非空字符串，与输入一致 |
+| `expense` | 必填；create/update 必须是四字段对象；clarify 必须 null |
+| `reason` | 必填；create/update 必须 null；clarify 必须为非空具体原因 |
 
-金额的最终业务验证按账单独立执行：有限正数，最多两位小数及 14 位有效数字。分类路径需符合个人分类树和远端单选选项，模型不能创造分类。
+`expense` 必须包含 `date`、`amount`、`description`、`category` 四字段，每字段可为 null，但不能省略。`date` 严格使用 `YYYY-MM-DD`；金额使用 Decimal，布尔值不能作为金额。分类对象必须包含 `level1`、`level2`、`level3`，三级缺失需显式 null。所有对象禁止额外字段。
 
-## 每轮运行上下文
+新增没有明确日期时由模型使用原消息当地发送日；程序执行前要求四项信息完整。更新仅填写明确要求修改的字段；程序保持其他字段并校验合并后的完整账单。金额为有限正数、最多两位小数，分类必须形成知识库中合法父子路径；有三级子项时不能省略三级。
 
-程序提供完整个人分类树、规则和最新明确偏好，以及以下数据：
+结构化校验由 Pydantic 完成，业务错误按笔反馈为执行失败；模型的 `clarify` 独立分组，不改成待补充流程。分类知识中的旧 `ask` 条目仅作为信息缺口的描述，模型需转成不写入原因，不能启用追问或偏好学习。
 
-| 上下文 | 用途 |
-| --- | --- |
-| `message_sent_at`、`timezone` | 本条消息在配置时区的时间 |
-| `default_date`、`relative_date_base` | 新消费默认日期及当前消息相对日期基准 |
-| `displayed_items` | 最新最终回复的固定编号映射 |
-| `pending_items` | 所有待补充、待处理的账单，各自保留原文、日期基准、已知事实和问题 |
-| `allowed_items` | 当前用户、当前会话内允许关联的账单 |
-| `last_record` | 最近成功账单，无编号即时纠错目标 |
-| `recent_turns` | 最近必要对话，仅在内存中保存 |
+## 运行约束
 
-账单上下文包含 `bill_id`、`text`、`sent_at`、`expense`、`status`、`question`、`pending_action`、`pending_patch`、`record_id` 和远端已确认的 `confirmed`。未完成修改的草稿与已确认字段分开保存。
-
-## 历史补全阶段
-
-首轮无模型可调用的业务工具。程序仅对 `needs_history` 决策的不同关键词执行只读查询，过滤非法分类案例，再统一发起一次补全推理。模型只能返回 `unresolved_decisions` 中的 ID；只允许补全分类或追问，不能改变交易事实、路由、来源或修改意图。程序保留首轮已确定决策。历史阶段失败或违反合同时，需要历史的项目独立追问，其他确定项目继续执行。
-
-普通消息仅需一次模型请求；输出校验允许一次重试，历史补全也允许一次重试。SDK 的 HTTP 自动重试另计，受发送前 HTTP 请求额度约束。
+每阶段设置一次输出重试和两次模型请求上限。模型没有业务工具，无法直接写表格。两阶段共享单条消息的实际 HTTP 发送预算，包含 SDK 自动重试和重定向，上限 10 次。离线测试使用 FunctionModel 和 MockTransport，不调用真实 LLM；结构和流程测试不能证明真实模型的全部语义准确性。

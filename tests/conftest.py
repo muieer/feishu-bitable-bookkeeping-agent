@@ -1,5 +1,6 @@
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -63,8 +64,6 @@ def settings(tmp_path):
         ("schema", {"tables": [{"id": "tbl_test", "fields": fields}]}),
     ]:
         (tmp_path / f"{name}.json").write_text(json.dumps(data, ensure_ascii=False))
-    prompt = tmp_path / "system.md"
-    prompt.write_text("测试专用系统提示词：只处理实际消费，依据个人规则分类，不确定时追问。")
     return Settings(
         _env_file=None,
         lark_app_id="cli_test",
@@ -73,11 +72,11 @@ def settings(tmp_path):
         ark_model="test-model",
         bitable_base_token="base_test",
         bitable_table_id="tbl_test",
-        agent_system_prompt_path=prompt,
+        recognition_prompt_path=Path(__file__).resolve().parents[1] / "prompts/recognition.md",
+        decision_prompt_path=Path(__file__).resolve().parents[1] / "prompts/decision.md",
         categories_path=tmp_path / "categories.json",
         rules_path=tmp_path / "rules.json",
         schema_path=tmp_path / "schema.json",
-        preferences_path=tmp_path / "preferences.json",
         operation_journal_path=tmp_path / "operations.json",
         message_log_dir=tmp_path / "logs",
         log_file_path=tmp_path / "logs/service.log",
@@ -98,6 +97,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from pathlib import Path
 import time
 
 root = Path(__file__).parent

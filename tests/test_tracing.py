@@ -118,7 +118,7 @@ async def test_post_submission_log_failure_continues_response_confirmation(
 
     monkeypatch.setattr(MessageTrace, "emit", failing)
     response = await s.reply(message("改为25元", message_id="om_2"))
-    assert "已修改" in response and LOG_FAILED_SUFFIX in response
+    assert "已更新消费记录" in response and LOG_FAILED_SUFFIX in response
     assert written(fake_cli)[0]["金额"] == 25
     assert s.journal.get("om_2")["status"] == "success"
 
@@ -217,50 +217,24 @@ def test_budget_has_absolute_cap_across_clients(settings):
 async def test_wire_body_and_parsed_plan_match_log(settings, fake_cli):
     settings.lark_cli_path, _ = fake_cli
     bodies = []
-    output = {"decisions": [create(amount="0.29").model_dump(mode="json")]}
+    from test_agent import recognition
+    from test_provider import completion
+
+    output = {"decisions": [create(raw="咖啡0.29元", amount="0.29").model_dump(mode="json")]}
 
     def handle(request):
         body = json.loads(request.content)
         bodies.append(body)
         assert not body.get("stream")
         assert len(body["tools"]) == 1
-        return httpx.Response(
-            200,
-            json={
-                "id": "completion",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "test-model",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "tool_calls",
-                        "message": {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": "call_1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": body["tools"][0]["function"]["name"],
-                                        "arguments": json.dumps(output),
-                                    },
-                                }
-                            ],
-                        },
-                    }
-                ],
-                "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
-            },
-        )
+        return completion(body, recognition("咖啡0.29元") if len(bodies) == 1 else output)
 
     async with TracedHTTPClient(transport=httpx.MockTransport(handle)) as client:
         model = OpenAIChatModel(
             "test-model", provider=OpenAIProvider(api_key="test-key", http_client=client)
         )
         s = BookkeepingService(settings, BitableTool(settings), model)
-        assert "0.29元" in await s.reply(message())
+        assert "0.29元" in await s.reply(message("咖啡0.29元"))
     events = records(logfile(settings))
     request = next(r for r in events if r["stage"] == "llm.http_request")
     assert json.loads(request["details"]["body"]) == bodies[0]
@@ -288,3 +262,112 @@ async def test_budget_counts_http_redirects_before_each_transport(settings):
         with pytest.raises(RequestBudgetExceeded):
             await client.post("https://example.invalid/chat/completions")
     assert len(attempts) == 1 and json.loads(budget.path.read_text())["requests"] == 1
+
+
+async def test_message_budget_caps_redirects_and_resets_for_each_message(settings):
+    from bookkeeping_agent.request_budget import message_request_scope
+
+    attempts = []
+
+    def handle(request):
+        attempts.append(str(request.url))
+        return httpx.Response(307, headers={"location": "https://example.invalid/redirect"})
+
+    async with TracedHTTPClient(
+        transport=httpx.MockTransport(handle), follow_redirects=True
+    ) as client:
+        with message_request_scope(10) as budget:
+            with pytest.raises(RequestBudgetExceeded):
+                await client.post("https://example.invalid/completions")
+            assert budget.requests == 10 and len(attempts) == 10
+        with message_request_scope(1) as budget:
+            with pytest.raises(RequestBudgetExceeded):
+                await client.post("https://example.invalid/completions")
+            assert budget.requests == 1 and len(attempts) == 11
+
+
+async def test_message_budget_shared_across_clients_and_nested_scopes():
+    from bookkeeping_agent.request_budget import message_request_scope
+
+    attempted = []
+
+    def handle(request):
+        attempted.append(request)
+        return httpx.Response(200, json={})
+
+    async with (
+        TracedHTTPClient(transport=httpx.MockTransport(handle)) as first,
+        TracedHTTPClient(transport=httpx.MockTransport(handle)) as second,
+    ):
+        with message_request_scope(2) as budget:
+            await first.post("https://example.invalid/completions")
+            with message_request_scope(10) as nested:
+                assert nested is budget
+                await second.post("https://example.invalid/completions")
+            with pytest.raises(RequestBudgetExceeded):
+                await first.post("https://example.invalid/completions")
+    assert len(attempted) == 2
+
+
+async def test_message_budget_counts_both_phases_output_retries_and_sdk_retries(settings, fake_cli):
+    from test_agent import recognition
+    from test_provider import completion
+
+    settings.lark_cli_path, _ = fake_cli
+    settings.llm_message_request_limit = 5
+    attempts = []
+    good = {"decisions": [create().model_dump(mode="json")]}
+
+    def handle(request):
+        body = json.loads(request.content)
+        attempts.append(body)
+        if len(attempts) in {1, 5}:
+            return httpx.Response(
+                500, json={"error": {"message": "busy"}}, headers={"retry-after-ms": "1"}
+            )
+        output = (
+            recognition("虚构消费")
+            if len(attempts) == 2
+            else recognition("咖啡18元")
+            if len(attempts) == 3
+            else good
+        )
+        return completion(body, output)
+
+    async with TracedHTTPClient(transport=httpx.MockTransport(handle)) as client:
+        sdk = AsyncOpenAI(api_key="test-key", http_client=client, max_retries=2)
+        model = OpenAIChatModel("test-model", provider=OpenAIProvider(openai_client=sdk))
+        s = BookkeepingService(settings, BitableTool(settings), model)
+        # First phase: HTTP failure, invalid output, corrected output = 3 sends.
+        # Second phase succeeds on send 4. No per-bill model call is made.
+        assert "已记账" in await s.reply(message())
+    assert len(attempts) == 4
+    budget = next(r for r in records(logfile(settings)) if r["stage"] == "llm.message_budget")
+    assert budget["details"] == {"requests": 4, "limit": 5}
+
+
+async def test_message_budget_stops_second_phase_sdk_retry_before_transport(settings, fake_cli):
+    from test_agent import recognition
+    from test_provider import completion
+
+    settings.lark_cli_path, _ = fake_cli
+    settings.llm_message_request_limit = 2
+    attempts = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        attempts.append(body)
+        if len(attempts) == 1:
+            return completion(body, recognition("咖啡18元"))
+        return httpx.Response(
+            500, json={"error": {"message": "busy"}}, headers={"retry-after-ms": "1"}
+        )
+
+    async with TracedHTTPClient(transport=httpx.MockTransport(handle)) as client:
+        sdk = AsyncOpenAI(api_key="test-key", http_client=client, max_retries=2)
+        model = OpenAIChatModel("test-model", provider=OpenAIProvider(openai_client=sdk))
+        s = BookkeepingService(settings, BitableTool(settings), model)
+        assert "调用次数已达上限" in await s.reply(message())
+    assert len(attempts) == 2 and not written(fake_cli)
+    budget = next(r for r in records(logfile(settings)) if r["stage"] == "llm.message_budget")
+    assert budget["details"] == {"requests": 2, "limit": 2}

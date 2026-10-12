@@ -1,5 +1,6 @@
-"""Model understanding is a plan, never permission to mutate the ledger."""
+"""Separate, closed contracts for recognition, decisions and executable expenses."""
 
+import re
 from datetime import date as ExpenseDate
 from datetime import datetime
 from decimal import Decimal
@@ -7,118 +8,119 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+BillId = Annotated[str, Field(pattern=r"^B[1-9][0-9]*$", strict=True)]
+Label = Annotated[str, Field(min_length=1, max_length=200, strict=True)]
+Raw = Annotated[str, Field(min_length=1, strict=True)]
 Money = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2, allow_inf_nan=False)]
-Label = Annotated[str, Field(min_length=1, max_length=200)]
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, revalidate_instances="always"
+    )
+
+
+class NewRecognitionItem(StrictModel):
+    type: Literal["new"]
+    target_id: None = Field(description="新消费没有正式编号，必须为 null。")
+    raw: Raw = Field(description="本次消费原文，仅规范化空白和货币符号，不推断事实。")
+
+
+class ExistingRecognitionItem(StrictModel):
+    type: Literal["existing"]
+    target_id: BillId = Field(description="必须关联输入中已有消费的 B 编号。")
+    raw: Raw = Field(description="本次修改原文，仅规范化空白和货币符号，不推断事实。")
+
+
+RecognitionItem = Annotated[
+    NewRecognitionItem | ExistingRecognitionItem, Field(discriminator="type")
+]
+
+
+class RecognitionResult(StrictModel):
+    items: list[RecognitionItem] = Field(
+        max_length=200, description="按消息顺序识别；无消费返回 []。"
+    )
+
+
+class IdentifiedItem(StrictModel):
+    bill_id: BillId
+    type: Literal["new", "existing"]
+    raw: Raw
 
 
 class CategoryPath(StrictModel):
     level1: Label
     level2: Label
-    level3: Label | None = None
+    level3: Label | None = Field(description="合法三级分类；二级无子分类时必须为 null。")
 
 
 class ExpensePatch(StrictModel):
-    date: ExpenseDate | None = Field(description="消费日期；未知或本次未要求修改时为 null。")
-    # Business validity is checked per bill, so one bad amount cannot discard other bills.
+    date: ExpenseDate | None = Field(description="ISO 日期；未知或本次未要求修改时为 null。")
     amount: Decimal | None = Field(
-        allow_inf_nan=False, description="实际支付金额；未知或本次未要求修改时为 null。"
+        allow_inf_nan=False,
+        description="人民币实付金额；未知或未修改为 null。业务校验正数及两位小数。",
     )
-    description: Annotated[str, Field(min_length=1, max_length=500)] | None = Field(
-        description="消费描述；未知或本次未要求修改时为 null。"
+    description: Annotated[str, Field(min_length=1, max_length=500, strict=True)] | None = Field(
+        description="具体消费内容；未知或未修改为 null。"
     )
-    category: CategoryPath | None = Field(
-        description="合法完整分类路径；尚未确定或本次未要求修改时为 null。"
-    )
+    category: CategoryPath | None = Field(description="完整合法分类路径；未知或未修改为 null。")
 
     @field_validator("amount", mode="before")
     @classmethod
-    def reject_boolean(cls, value):
-        if isinstance(value, bool):
-            raise ValueError("boolean is not money")  # noqa: TRY004 -- Pydantic validation error.
+    def money_type(cls, value):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal))
+        ):
+            raise ValueError("amount 必须为十进制金额，不能为布尔值或其他类型")
+        return value
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def date_type(cls, value):
+        if value is not None and (
+            isinstance(value, datetime) or not isinstance(value, (str, ExpenseDate))
+        ):
+            raise ValueError("date 必须为 ISO 日期，不能为时间戳")
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None:
+            raise ValueError("date 必须严格使用 YYYY-MM-DD 格式")
         return value
 
 
 class Expense(ExpensePatch):
     date: ExpenseDate
     amount: Money
-    description: Annotated[str, Field(min_length=1, max_length=500)]
+    description: Annotated[str, Field(min_length=1, max_length=500, strict=True)]
     category: CategoryPath
 
 
-class Preference(StrictModel):
-    subject: Annotated[str, Field(min_length=1, max_length=100)]
-    condition: Annotated[str, Field(min_length=1, max_length=500)]
-    category: CategoryPath
-    evidence: Annotated[str, Field(min_length=1, max_length=500)]
+class CreateDecision(StrictModel):
+    bill_id: BillId
+    action: Literal["create"]
+    raw: Raw
+    expense: ExpensePatch
+    reason: None = Field(description="create 的 reason 必须为 null。")
 
 
-class Decision(StrictModel):
-    decision_id: Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[\w-]+$")]
-    source_text: Annotated[str, Field(min_length=1)] = Field(
-        description="本消息中表达这一独立意图的连续原文片段，不重写，不按标点拆交易。"
-    )
-    source_occurrence: Annotated[int, Field(gt=0, strict=True)] = Field(
-        default=1, description="相同原文片段在消息中第几次出现，区分真实的相同消费。"
-    )
-    action: Literal["ignore", "create", "update", "preference", "clarify"]
-    expense: ExpensePatch | None = Field(
-        description="必填。create/update 必须提供消费对象及四个字段；clarify 保留已知事实；ignore/preference 为 null。"
-    )
-    preference: Preference | None = Field(
-        description="必填。preference 必须提供长期偏好对象；其他操作为 null。"
-    )
-    question: Annotated[str, Field(min_length=1, max_length=500)] | None = Field(
-        description="必填。clarify 必须提供具体问题；无需追问时为 null。"
-    )
-    unresolved: list[str] = Field(default_factory=list)
-    needs_history: bool = False
-    history_keywords: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
-        default_factory=list, max_length=2
-    )
-    continues_pending: bool = Field(description="回答待补充账单为 true；新消费为 false。")
-    target_id: Label | None = Field(
-        description="自然语言指向上下文中的稳定 bill_id；新消费为 null。"
-    )
-    target_reference: Label | None = Field(
-        default=None, description="自然语言目标的原文，如晚饭；须唯一匹配已有账单描述或原文。"
-    )
-    target_number: Annotated[int, Field(gt=0, strict=True)] | None = Field(
-        description="仅指向最新最终回复 displayed_items 的编号；没有编号时为 null。"
-    )
-    clarification_scope: Literal["expense", "target"] = "expense"
-    cancel_pending: bool = Field(default=False, description="明确取消未完成账单，用 ignore。")
+class UpdateDecision(StrictModel):
+    bill_id: BillId
+    action: Literal["update"]
+    raw: Raw
+    expense: ExpensePatch
+    reason: None = Field(description="update 的 reason 必须为 null。")
 
-    @model_validator(mode="after")
-    def coherent_action(self):
-        if self.action == "ignore" and (
-            self.expense or self.preference or self.question or self.needs_history
-        ):
-            raise ValueError("ignore cannot carry business operations")
-        if self.action in {"create", "update"} and self.expense is None:
-            raise ValueError(
-                "create/update 的 expense 不能为 null；必须返回 date、amount、description、category，未知或未修改字段为 null。"
-            )
-        if self.action == "clarify" and self.question is None:
-            raise ValueError("question is required")
-        if (self.action == "preference") != (self.preference is not None):
-            raise ValueError("preference only belongs to a preference decision")
-        if self.action == "preference" and (
-            self.expense or self.target_id or self.target_number or self.continues_pending
-        ):
-            raise ValueError("preference cannot implicitly modify a bill")
-        if self.cancel_pending and self.action != "ignore":
-            raise ValueError("cancellation uses ignore")
-        if self.needs_history and (
-            self.action not in {"create", "update", "clarify"}
-            or self.clarification_scope == "target"
-            or not self.history_keywords
-        ):
-            raise ValueError("history requires an established expense and keywords")
-        return self
+
+class ClarifyDecision(StrictModel):
+    bill_id: BillId
+    action: Literal["clarify"]
+    raw: Raw
+    expense: None = Field(description="clarify 不携带待补充账单，必须为 null。")
+    reason: Annotated[str, Field(min_length=1, max_length=500, strict=True)]
+
+
+Decision = Annotated[
+    CreateDecision | UpdateDecision | ClarifyDecision, Field(discriminator="action")
+]
 
 
 class MessagePlan(StrictModel):
@@ -126,9 +128,9 @@ class MessagePlan(StrictModel):
 
     @model_validator(mode="after")
     def unique_ids(self):
-        ids = [d.decision_id for d in self.decisions]
+        ids = [d.bill_id for d in self.decisions]
         if len(ids) != len(set(ids)):
-            raise ValueError("decision IDs must be unique within the message")
+            raise ValueError("每个消费编号只能有一个决策")
         return self
 
 
@@ -137,7 +139,7 @@ class IncomingMessage(StrictModel):
     user_id: Label
     chat_id: Label
     sent_at: datetime
-    text: Annotated[str, Field(min_length=1)]
+    text: Raw
 
     @field_validator("sent_at")
     @classmethod
